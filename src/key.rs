@@ -26,6 +26,29 @@ fn on_map_key(
     {
         return;
     }
+    if key != "key.keyboard.unknown" && game.playing() && game.mod_screen().is_none() {
+        for (id, nearer) in [("minimap_zoom_in", true), ("minimap_zoom_out", false)] {
+            if game.mod_key(runtime::MOD_ID, id)
+                .is_some_and(|(bound, mods)| bound == key && mods.bits & 7 == modifiers & 7)
+            {
+                let mut settings = runtime::minimap::Settings::default();
+                if let Some(index) = game.map_option("zoom") {
+                    settings.select_option(4, usize::from(index));
+                }
+                if let Some(index) = settings.zoom_step(nearer) {
+                    crate::game::minimap_compat::write_map_setting(game, "zoom", &index.to_string());
+                }
+                return;
+            }
+        }
+    }
+    if key != "key.keyboard.unknown" && game.playing() && game.mod_screen().is_none()
+        && game.mod_key(runtime::MOD_ID, "next_waypoint_group")
+            .is_some_and(|(bound, mods)| bound == key && mods.bits & 7 == modifiers & 7)
+    {
+        crate::game::reworked_maps::cycle_waypoint_group(game);
+        return;
+    }
     if key != "key.keyboard.unknown" && game.mod_key(runtime::MOD_ID, "slime_map")
         .is_some_and(|(bound, mods)| bound == key && mods.bits & 7 == modifiers & 7)
         && game.playing() && game.mod_screen().is_none()

@@ -283,5 +283,11 @@
   "mwwr.setting.world_cave_type": "Тип пещерного слоя карты мира",
   "mwwr.key.slime_map": "Карта слизневых чанков",
   "mwwr.key.create_waypoint": "Создать метку",
-  "mwwr.key.map_settings": "Настройки карт"
+  "mwwr.key.map_settings": "Настройки карт",
+  "mwwr.key.minimap_zoom_in": "Приблизить мини-карту",
+  "mwwr.key.minimap_zoom_out": "Отдалить мини-карту",
+  "mwwr.setting.minimap_position_custom": "Свободное положение мини-карты",
+  "mwwr.setting.minimap_position_x": "Положение мини-карты по горизонтали",
+  "mwwr.setting.minimap_position_y": "Положение мини-карты по вертикали",
+  "mwwr.key.next_waypoint_group": "Следующая группа меток"
 }

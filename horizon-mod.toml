@@ -1,8 +1,8 @@
 id = "trailgrid_maps"
-name = "trail"
-version = "0.1.1"
+name = "Kadir's Map"
+version = "0.1.7"
 description = "Explore with a configurable minimap, a persistent world map, waypoint groups, and entity radar."
-authors = ["daniliammo", "Gurov08ruS"]
+authors = ["Kadir (maintainer)"]
 license = "GPL-3.0-only"
 # A native mod: Rust in src/, compiled by the launcher against the game build [native] pins, beside data/ and assets/.
 api = "0.2"
@@ -44,6 +44,18 @@ id="map-providers"
 file="crates/horizon-client/src/game.rs"
 name="minimap_providers"
 source="src/map_providers.rs"
+
+[[native.module]]
+id="radar-editor"
+file="crates/horizon-client/src/game.rs"
+name="minimap_radar_editor"
+source="src/radar_editor.rs"
+
+[[native.module]]
+id="radar-icons"
+file="crates/horizon-client/src/game.rs"
+name="minimap_radar_icons"
+source="src/radar_icons.rs"
 
 [[native.mixin]]
 id = "map-radar-tick"
@@ -165,3 +177,14 @@ cancellable = true
 target = "horizon_client::game::native_hooks::client_services::Game::native_menu_background"
 helper = "src/menu_background.rs"
 bindings = [{name = "game", ty = "&crate::game::Game<'_>", value = "self"}, {name = "radius", ty = "&mut Option<f32>", value = "radius"}]
+
+[[native.mixin]]
+id = "map-menu-icon"
+target = "horizon_client::game::native_hooks::Game::list_native_mods"
+kind = "AFTER_CALL"
+selector = "rows.extend"
+ordinal = 0
+require = 1
+result = "()"
+helper = "src/menu_icon.rs"
+bindings = [{name = "game", ty = "&mut crate::game::Game<'_>", value = "self"}]

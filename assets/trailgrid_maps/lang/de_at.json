@@ -222,5 +222,11 @@
   "mwwr.setting.map_open_animation": "World map opening animation",
   "mwwr.setting.minimap_compass_front": "Compass in front of map overlays",
   "mwwr.setting.waypoints_new_bottom": "New waypoints at bottom",
-  "mwwr.setting.map_write_radius": "Map writing radius in chunks (-1 uses all received chunks)"
+  "mwwr.setting.map_write_radius": "Map writing radius in chunks (-1 uses all received chunks)",
+  "mwwr.key.minimap_zoom_in": "Minikarte vergrößern",
+  "mwwr.key.minimap_zoom_out": "Minikarte verkleinern",
+  "mwwr.setting.minimap_position_custom": "Benutzerdefinierte Minikartenposition",
+  "mwwr.setting.minimap_position_x": "Horizontale Minikartenposition",
+  "mwwr.setting.minimap_position_y": "Vertikale Minikartenposition",
+  "mwwr.key.next_waypoint_group": "Nächste Wegpunktgruppe"
 }
