@@ -1,5 +1,29 @@
 # Kadir's Map validation
 
+## 0.1.10
+
+The package passed the Horizon registry checker and built with Freecam+ 2.0.5 on Horizon Nightly `8f83e5c`, Minecraft 26.3. The final native build is `native-8f83e5c-6995a5ecf9ad`. On the pinned SDK, 140 tests passed and three were ignored.
+
+In disposable worlds, the UI was exercised in English at 1920 × 1280 GUI units and in Russian at 480 × 320. The tests created a waypoint, searched for it with the keyboard, opened the map and sidebar context menu, centered on a waypoint, exported PNG terrain, changed a setting in both directions, dragged a settings slider, opened radar categories and minimap placement, and returned to the game from the waypoint list. A separate local regression check confirmed that the save scan still exports distant terrain and leaves the original region file unchanged.
+
+The final build opened the world map and waypoint list on live Horizon SMP using an isolated copy of the existing profile. All prior cache paths and waypoint records were present. The main launcher profile now selects the tested native build. All five original map data files and the Freecam+ package matched their pre-install hashes.
+
+## 0.1.9
+
+The package passed the Horizon registry checker. Horizon Nightly `8f83e5c` built it with Freecam+ 2.0.5 on Minecraft 26.3 as `native-8f83e5c-aad034f744cf`. On the pinned SDK, 140 tests passed and three were ignored.
+
+In a local save, the scan added a region at block coordinates (8192, -4096) that the client had never visited. The region appeared in a 512 × 512 PNG export after the scan and its source file retained its original SHA-256 hash. The merge test verifies that known colors and heights survive a scan while gaps and a separate dimension can be added. The local radar displayed textured 3D sheep, villager, and iron golem icons.
+
+On Horizon SMP, the radar rendered textured 3D mobs and both the world map and waypoint list opened. The isolated test profile found every original waypoint record and cache path. The server save was outside this check. The main launcher profile now selects the tested native build. The five existing map data files and the Freecam+ package matched their pre-install SHA-256 hashes.
+
+## 0.1.8
+
+The package passed the Horizon registry checker and ran with Freecam+ 2.0.5 on Minecraft 26.3 and Horizon Nightly `8f83e5c`. The final native build was `native-8f83e5c-262722ca4d25`. On the pinned SDK, 139 tests passed and three were ignored.
+
+The LAN run exported one PNG from the world map, then imported a copied Xaero `world-map/client.cfg` and the client's selected profile. The game applied the PNG preferences, disabled waypoint visibility and separate world map cave height. The second export wrote four 512 × 512 region PNGs. The export regression test covers night tint, claim colors, negative region coordinates and cleanup after a failed split export.
+
+The final build opened the world map and waypoint list on Horizon SMP with a copy of the existing data. The existing map cache paths and all original waypoint records remained present. The update to the main profile preserved all five map data files byte-for-byte and verified the Freecam+ package hash.
+
 ## 0.1.7
 
 Horizon Nightly `8f83e5c` built Kadir's Map 0.1.7 and Freecam+ 2.0.5 together as `native-8f83e5c-11b3350a9ce5`. The native package checker passed. On the pinned SDK, 137 tests passed and three were ignored.

@@ -2,7 +2,7 @@
 use super::{
     Game,
     minimap_compat::{MapAccess, xaero_radar_categories},
-    reworked_maps::{button, fit_text, inside, settings_panel},
+    reworked_maps::{button, draw_scroll_indicator, draw_tooltip, fit_text, inside, settings_panel, ui_panel, UI_ACCENT},
 };
 use ::trailgrid_maps::{radar::Selector, runtime, xaero_settings};
 use horizon_client::hud::HudBatch;
@@ -528,9 +528,8 @@ fn action(panel: [f32; 4], index: usize) -> [f32; 4] {
 pub(super) fn draw(game: &Game<'_>, batch: &mut HudBatch, editor: &Editor) {
     let panel = settings_panel(batch.width, batch.height);
     let mouse = game.cursor();
-    game.native_fill(batch, [0., 0., batch.width, batch.height], 0xd710171e);
-    game.native_fill(batch, panel, 0xff23303b);
-    game.native_fill(batch, [panel[0], panel[1], panel[2], 2.], 0xff62d0c2);
+    game.native_fill(batch, [0., 0., batch.width, batch.height], 0x80110e0f);
+    ui_panel(game, batch, panel);
     game.map_text(
         batch,
         localized("Radar categories", "Категории радара"),
@@ -551,6 +550,7 @@ pub(super) fn draw(game: &Game<'_>, batch: &mut HudBatch, editor: &Editor) {
     let start = editor
         .scroll
         .min((children + FIELDS.len()).saturating_sub(count));
+    let mut tooltip = None;
     for (i, absolute) in (start..children + FIELDS.len()).take(count).enumerate() {
         let rect = row(panel, i);
         if absolute < children {
@@ -586,9 +586,14 @@ pub(super) fn draw(game: &Game<'_>, batch: &mut HudBatch, editor: &Editor) {
                 value => Cow::Owned(value.to_string()),
             }
         };
+        let full_label = localized(field.en, field.ru);
+        let label = fit_text(game, full_label, rect[2] - right - 6.);
+        if label != full_label && inside(mouse, rect) {
+            tooltip = Some(full_label);
+        }
         game.map_text(
             batch,
-            &fit_text(game, localized(field.en, field.ru), rect[2] - right - 6.),
+            &label,
             [rect[0] + 2., rect[1] + 5.],
             0xffeaf1f6,
             false,
@@ -602,9 +607,12 @@ pub(super) fn draw(game: &Game<'_>, batch: &mut HudBatch, editor: &Editor) {
             true,
         );
         if active.is_some() {
-            game.native_fill(batch, [control[0], control[1] + 19., right, 1.], 0xff62d0c2);
+            game.native_fill(batch, [control[0] + 2., control[1] + 18., right - 4., 1.], UI_ACCENT);
         }
     }
+    draw_scroll_indicator(game, batch, [panel[0], panel[1] + 42., panel[2], count as f32 * 22.],
+        children + FIELDS.len(), count, start);
+    if let Some(label) = tooltip { draw_tooltip(game, batch, label, mouse); }
     let help = if !editor.message.is_empty() {
         &editor.message
     } else if let Some((index, _)) = editor.input.as_ref() {

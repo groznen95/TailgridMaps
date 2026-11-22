@@ -6,6 +6,79 @@ macro_rules! define_tests {
     () => {
         mod tests {
             #[test]
+            fn saved_regions_fill_unknown_pixels_without_replacing_explored_terrain() {
+                let dir = CacheDir::new("saved-world-unexplored");
+                let dimension = Dimension::Overworld;
+                let layer = Layer::Surface;
+                let mut cache = Cache::open(&dir.0, "save:Region QA", 32 * 1024 * 1024).unwrap();
+                let mut visited = Tile { pixels: vec![0; 1024], ..Tile::default() };
+                visited.pixels[..4].copy_from_slice(&[1, 2, 3, 255]);
+                visited.heights[0] = 90;
+                save_chunk(&mut cache, dimension, layer, [-32, 0], visited);
+                let saved = Tile { pixels: [10, 20, 30, 255].repeat(256), heights: [64; 256], ..Tile::default() };
+                assert!(cache.merge_import_tile(dimension, layer, [-32, 0], saved.clone()).unwrap());
+                assert!(cache.merge_import_tile(Dimension::Nether, layer, [32, -32], saved.clone()).unwrap());
+                assert!(!cache.merge_import_tile(dimension, layer, [-32, 0], saved).unwrap());
+                cache.flush().unwrap();
+                drop(cache);
+                let cache = Cache::open(&dir.0, "save:Region QA", 32 * 1024 * 1024).unwrap();
+                let merged = cache.tile_at((dimension, layer, -32, 0)).unwrap();
+                assert_eq!(&merged.pixels[..8], &[1, 2, 3, 255, 10, 20, 30, 255]);
+                assert_eq!(&merged.heights[..2], &[90, 64]);
+                assert!(cache.tile_at((Dimension::Nether, layer, 32, -32)).is_some());
+            }
+
+            #[test]
+            fn png_exports_keep_region_coordinates_and_apply_optional_styling() {
+                fn write_test(path: &Path, width: u32, height: u32, pixels: &[u8]) -> io::Result<()> {
+                    assert_eq!(pixels.len(), (width * height * 4) as usize);
+                    if width == 512 && height == 512 {
+                        let painted = if path.file_name().unwrap() == "-1_0.png" { 496 } else { 0 };
+                        assert_eq!(pixels[painted * 4 + 3], 255);
+                        assert_eq!(pixels[(painted + 512 * 20) * 4 + 3], 0);
+                    } else {
+                        assert!(width <= 512 && height < 16);
+                    }
+                    std::fs::write(path, [])
+                }
+                fn fail_second(path: &Path, _: u32, _: u32, _: &[u8]) -> io::Result<()> {
+                    if path.file_name().unwrap() == "2_0.png" { return Err(io::Error::other("disk full")); }
+                    std::fs::write(path, [])
+                }
+
+                let dir = CacheDir::new("export-options");
+                let dimension = Dimension::Overworld;
+                let layer = Layer::Surface;
+                let mut cache = Cache::default();
+                for x in [-1, 64] {
+                    cache.insert(dimension, layer, [x, 0], Tile {
+                        pixels: [160, 120, 80, 255].repeat(256),
+                        ..Tile::default()
+                    });
+                }
+                let mut export = PngExport {
+                    dimension, layer, regions: false, night: false, max_edge: 512,
+                    claims: BTreeMap::new(),
+                };
+                let default = cache.png_pixels(&export, [(-1, 0)], [-1, 0], [16, 16], 1);
+                assert_eq!(&default[..4], &[174, 131, 87, 255]);
+                export.night = true;
+                export.claims.insert((-1, 0), (0, 0xff00ff00));
+                let styled = cache.png_pixels(&export, [(-1, 0)], [-1, 0], [16, 16], 1);
+                assert_eq!(&styled[..4], &[0, 255, 0, 255]);
+                assert_eq!(&styled[68..72], &[69, 65, 56, 255]);
+                let file = cache.export_png(&export, &dir.0, write_test).unwrap();
+                assert!(dir.0.join("exports").join(file).is_file());
+                export.regions = true;
+                let folder = cache.export_png(&export, &dir.0, write_test).unwrap();
+                let root = dir.0.join("exports");
+                assert!(root.join(&folder).join("-1_0.png").is_file());
+                assert!(root.join(folder).join("2_0.png").is_file());
+                assert!(cache.export_png(&export, &dir.0, fail_second).is_err());
+                assert_eq!(std::fs::read_dir(root).unwrap().count(), 2);
+            }
+
+            #[test]
             fn grid_aligns_to_chunk_edges_across_origin_and_with_rotation() {
                 let mut v = view(Dimension::Overworld);
                 v.center = [-1.0, -16.0];

@@ -142,29 +142,34 @@ pub fn read_active(directory: &Path, next: bool) -> io::Result<Import> {
 }
 
 pub fn read(directory: &Path) -> io::Result<Import> {
-    const LIMIT: u64 = 256 * 1024;
     let mut import = Import::default();
     let mut found = false;
-    for (world_map, files) in [
-        (false, ["xaerominimap.txt", "minimap.cfg"]),
-        (true, ["xaeroworldmap.txt", "worldmap.cfg"]),
+    for (world_map, folder, files) in [
+        (false, "minimap", ["xaerominimap.txt", "minimap.cfg"]),
+        (true, "world-map", ["xaeroworldmap.txt", "worldmap.cfg"]),
     ] {
-        for file in files {
-            let path = directory.join(file);
-            let input = match File::open(&path) {
-                Ok(input) => input,
-                Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
-                Err(error) => return Err(error),
-            };
-            found = true;
-            let mut text = String::new();
-            input.take(LIMIT + 1).read_to_string(&mut text)?;
-            if text.len() as u64 > LIMIT {
-                return Err(io::Error::other(format!(
-                    "Xaero profile exceeds 256 KiB: {file}"
-                )));
-            }
+        let native = directory.join(folder);
+        let client = read_config(&native.join("client.cfg"))?;
+        let profile = client.as_deref().and_then(|text| {
+            text.lines().find_map(|line| {
+                let (key, value) = line.trim_start_matches('\u{feff}').split_once('=')?;
+                let value = value.trim().trim_matches('"');
+                (key.trim() == "current_profile" && valid_profile(value)).then_some(value)
+            })
+        }).unwrap_or("default");
+        if let Some(text) = read_config(&native.join("profiles").join(format!("{profile}.cfg")))? {
             parse(&text, world_map, &mut import);
+            found = true;
+        }
+        if let Some(text) = client {
+            parse(&text, world_map, &mut import);
+            found = true;
+        }
+        for file in files {
+            if let Some(text) = read_config(&directory.join(file))? {
+                parse(&text, world_map, &mut import);
+                found = true;
+            }
         }
     }
     import.radar_categories = read_radar_categories(directory)?;
@@ -187,6 +192,21 @@ pub fn read(directory: &Path) -> io::Result<Import> {
     import.unsupported.sort();
     import.unsupported.dedup();
     Ok(import)
+}
+
+fn read_config(path: &Path) -> io::Result<Option<String>> {
+    const LIMIT: u64 = 256 * 1024;
+    let file = match File::open(path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    let mut text = String::new();
+    file.take(LIMIT + 1).read_to_string(&mut text)?;
+    if text.len() as u64 > LIMIT {
+        return Err(io::Error::other(format!("Xaero profile exceeds 256 KiB: {}", path.display())));
+    }
+    Ok(Some(text))
 }
 
 pub fn read_radar_categories(directory: &Path) -> io::Result<Option<String>> {
@@ -265,6 +285,9 @@ fn parse(input: &str, world_map: bool, out: &mut Import) {
             continue;
         };
         let (key, value) = (key.trim(), value.trim());
+        if key == "current_profile" {
+            continue;
+        }
         if matches!(
             (world_map, key),
             (false, "minimap_item") | (true, "map_item")
@@ -655,6 +678,18 @@ fn parse(input: &str, world_map: bool, out: &mut Import) {
                 ("radar_world_map", bool_value())
             }
             (true, "render_waypoints" | "renderWaypoints") => ("world_map_waypoints", bool_value()),
+            (true, "display_disabled_waypoints") => ("world_show_disabled_waypoints", bool_value()),
+            (true, "png_export_in_multiple_images") => ("world_png_regions", bool_value()),
+            (true, "png_export_night") => ("world_png_night", bool_value()),
+            (true, "png_export_highlights") => ("world_png_claims", bool_value()),
+            (true, "png_export_scale_down_square") => ("world_png_max_edge", value.parse::<u16>().ok()
+                .filter(|regions| *regions <= 90)
+                .map(|regions| if regions == 0 { 4096 } else { regions.saturating_mul(512).min(4096) }.to_string())),
+            (true, "cave_mode_start_y") => ("world_cave_y", if value == "2147483647" {
+                Some("320".to_owned())
+            } else {
+                bounded(value, -64, 319)
+            }),
             (true, "map_teleport_allowed") => ("map_teleport_allowed", bool_value()),
             (true, "partial_y_teleport") => ("map_partial_y", bool_value()),
             _ => ("", None),
@@ -731,6 +766,37 @@ mod tests {
         let zoom = import.settings["zoom"].parse::<usize>().unwrap();
         assert_eq!(Settings::options(4)[zoom].blocks_per_pixel, 1. / 3.);
         assert_eq!(import.settings["minimap_cave_roof"], "3");
+        assert!(import.unsupported.is_empty());
+    }
+
+    #[test]
+    fn reads_a_native_world_map_profile_and_its_export_preferences() {
+        let nonce = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+        let directory = std::env::temp_dir().join(format!("trailgrid-xaero-layout-{}-{nonce}", std::process::id()));
+        let world = directory.join("world-map");
+        std::fs::create_dir_all(world.join("profiles")).unwrap();
+        std::fs::write(world.join("client.cfg"), concat!(
+            "\u{feff}current_profile = Building\n",
+            "png_export_scale_down_square=3\npng_export_in_multiple_images=true\n",
+            "png_export_night=true\npng_export_highlights=true\n",
+            "cave_mode_start_y=2147483647\ndisplay_disabled_waypoints=true",
+        )).unwrap();
+        std::fs::write(world.join("profiles/Building.cfg"), "render_waypoints=false").unwrap();
+        let import = read(&directory).unwrap();
+        std::fs::remove_dir_all(directory).unwrap();
+        assert_eq!(import.settings["world_map_waypoints"], "false");
+        assert_eq!(import.settings["world_show_disabled_waypoints"], "true");
+        assert_eq!(import.settings["world_png_max_edge"], "1536");
+        assert_eq!(import.settings["world_png_regions"], "true");
+        assert_eq!(import.settings["world_png_night"], "true");
+        assert_eq!(import.settings["world_png_claims"], "true");
+        assert!(!import.settings.contains_key("cave_y"));
+        assert_eq!(import.settings["world_cave_y"], "320");
+        let mut import = import;
+        parse("minimap_manual_cave_mode_start=-15", false, &mut import);
+        parse("cave_mode_start_y=40", true, &mut import);
+        assert_eq!(import.settings["cave_y"], "-15");
+        assert_eq!(import.settings["world_cave_y"], "40");
         assert!(import.unsupported.is_empty());
     }
 }

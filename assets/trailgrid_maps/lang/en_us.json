@@ -289,5 +289,11 @@
   "mwwr.setting.minimap_position_custom": "Custom minimap position",
   "mwwr.setting.minimap_position_x": "Minimap horizontal position",
   "mwwr.setting.minimap_position_y": "Minimap vertical position",
-  "mwwr.key.next_waypoint_group": "Next waypoint group"
+  "mwwr.key.next_waypoint_group": "Next waypoint group",
+  "mwwr.setting.world_show_disabled_waypoints": "Show disabled waypoints on the world map",
+  "mwwr.setting.world_png_regions": "Export separate region PNGs",
+  "mwwr.setting.world_png_night": "Apply a night tint to PNGs",
+  "mwwr.setting.world_png_claims": "Include claims in PNGs",
+  "mwwr.setting.world_png_max_edge": "Maximum single PNG side (px)",
+  "mwwr.setting.world_cave_y": "World map manual cave height"
 }

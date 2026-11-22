@@ -289,5 +289,11 @@
   "mwwr.setting.minimap_position_custom": "Свободное положение мини-карты",
   "mwwr.setting.minimap_position_x": "Положение мини-карты по горизонтали",
   "mwwr.setting.minimap_position_y": "Положение мини-карты по вертикали",
-  "mwwr.key.next_waypoint_group": "Следующая группа меток"
+  "mwwr.key.next_waypoint_group": "Следующая группа меток",
+  "mwwr.setting.world_show_disabled_waypoints": "Показывать отключённые метки на карте",
+  "mwwr.setting.world_png_regions": "Экспортировать регионы отдельными PNG",
+  "mwwr.setting.world_png_night": "Ночная тонировка PNG",
+  "mwwr.setting.world_png_claims": "Экспортировать приваты в PNG",
+  "mwwr.setting.world_png_max_edge": "Максимальная сторона одного PNG (пкс)",
+  "mwwr.setting.world_cave_y": "Высота ручного слоя пещер на карте мира"
 }

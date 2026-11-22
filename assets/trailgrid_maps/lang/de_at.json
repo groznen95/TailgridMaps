@@ -228,5 +228,11 @@
   "mwwr.setting.minimap_position_custom": "Benutzerdefinierte Minikartenposition",
   "mwwr.setting.minimap_position_x": "Horizontale Minikartenposition",
   "mwwr.setting.minimap_position_y": "Vertikale Minikartenposition",
-  "mwwr.key.next_waypoint_group": "Nächste Wegpunktgruppe"
+  "mwwr.key.next_waypoint_group": "Nächste Wegpunktgruppe",
+  "mwwr.setting.world_show_disabled_waypoints": "Deaktivierte Wegpunkte auf der Karte zeigen",
+  "mwwr.setting.world_png_regions": "Ein PNG pro Region exportieren",
+  "mwwr.setting.world_png_night": "Nachttönung für PNGs",
+  "mwwr.setting.world_png_claims": "Grundstücke in PNGs anzeigen",
+  "mwwr.setting.world_png_max_edge": "Maximale PNG-Seitenlänge (px)",
+  "mwwr.setting.world_cave_y": "Manuelle Höhlenhöhe auf der Weltkarte"
 }
