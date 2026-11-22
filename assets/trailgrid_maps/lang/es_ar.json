@@ -228,5 +228,11 @@
   "mwwr.setting.minimap_position_custom": "Posición personalizada del minimapa",
   "mwwr.setting.minimap_position_x": "Posición horizontal del minimapa",
   "mwwr.setting.minimap_position_y": "Posición vertical del minimapa",
-  "mwwr.key.next_waypoint_group": "Siguiente grupo de marcadores"
+  "mwwr.key.next_waypoint_group": "Siguiente grupo de marcadores",
+  "mwwr.setting.world_show_disabled_waypoints": "Mostrar marcadores desactivados en el mapa",
+  "mwwr.setting.world_png_regions": "Exportar un PNG por región",
+  "mwwr.setting.world_png_night": "Tinte nocturno de los PNG",
+  "mwwr.setting.world_png_claims": "Incluir parcelas en los PNG",
+  "mwwr.setting.world_png_max_edge": "Lado máximo de un PNG (píxeles)",
+  "mwwr.setting.world_cave_y": "Altura manual de cuevas en el mapa"
 }
