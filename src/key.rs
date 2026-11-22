@@ -75,15 +75,13 @@ fn on_map_key(
         return;
     };
     if game.mod_screen() == Some(runtime::MOD_ID) {
-        if request == runtime::ScreenRequest::Settings {
-            runtime::request_screen(runtime::ScreenRequest::SettingsOverlay);
-            return;
-        }
-        if request == runtime::ScreenRequest::Create {
-            runtime::request_screen(request);
-            return;
-        }
-        game.mod_screen_close(runtime::MOD_ID);
+        use runtime::ScreenRequest::*;
+        runtime::request_screen(match request {
+            Settings => SettingsOverlay,
+            Map => MapOverlay,
+            Waypoints => WaypointsOverlay,
+            _ => request,
+        });
         return;
     }
     if !game.playing() || !crate::game::reworked_maps::check_map_item(game,matches!(request,runtime::ScreenRequest::Map)) {

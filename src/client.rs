@@ -162,6 +162,7 @@ enum MenuAction {
     ExportPng,
     ImportXaero,
     ImportXaeroCache,
+    ScanSave,
     ImportXaeroSettings,
     ReloadRadarRules,
     NextXaeroProfile,
@@ -210,7 +211,7 @@ fn multiply_color(base: u32, tint: u32) -> u32 {
     (channel(16) << 16) | (channel(8) << 8) | channel(0)
 }
 
-struct LeafPalette {
+pub(super) struct LeafPalette {
     /// Block state id → the texture colour the game draws with, before tint.
     states: BTreeMap<u32, LeafColor>,
     snow: u32,
@@ -453,6 +454,7 @@ struct State {
     waypoint_confirm_delete: bool,
     waypoint_groups_scroll: usize,
     waypoint_selected: Option<u64>,
+    waypoints_back_to_map: bool,
     waypoint_group: Option<String>,
     destinations: BTreeMap<u64,Instant>,
     deaths_outside_reach: BTreeSet<u64>,
@@ -476,13 +478,13 @@ struct State {
     map_focus: Option<Spot>,
     map_panel: MapPanel,
     map_panel_scroll: usize,
-    map_panel_hidden: bool,
     server_world_name: String,
     server_world_focus: bool,
     map_settings_change: Option<(String, String)>,
     settings_return: Option<Mode>,
     settings_tab: usize,
     settings_scroll: usize,
+    settings_slider: Option<(String, [f32; 2])>,
     placement: Option<PlacementEdit>,
     radar_editor: Option<super::minimap_radar_editor::Editor>,
     placement_change: Option<Option<[f32; 2]>>,
@@ -552,6 +554,7 @@ impl Default for State {
             waypoint_confirm_delete: false,
             waypoint_groups_scroll: 0,
             waypoint_selected: None,
+            waypoints_back_to_map: false,
             waypoint_group: None,
             destinations: BTreeMap::new(),
             deaths_outside_reach: BTreeSet::new(),
@@ -575,13 +578,13 @@ impl Default for State {
             map_focus: None,
             map_panel: MapPanel::None,
             map_panel_scroll: 0,
-            map_panel_hidden: false,
             server_world_name: String::new(),
             server_world_focus: false,
             map_settings_change: None,
             settings_return: None,
             settings_tab: 0,
             settings_scroll: 0,
+            settings_slider: None,
             placement: None,
             radar_editor: None,
             placement_change: None,
@@ -1112,6 +1115,9 @@ pub(super) fn fit_text(game: &Game<'_>, text: &str, width: f32) -> String {
     if game.map_text_width(text) <= width {
         return text.to_owned();
     }
+    if game.map_text_width("…") > width {
+        return String::new();
+    }
     let mut out = String::new();
     for c in text.chars() {
         let mut candidate = out.clone();
@@ -1627,6 +1633,11 @@ fn menu_items(
         tr("Next Xaero profile","Следующий профиль Xaero","Profil Xaero suivant","Siguiente perfil Xaero","Nächstes Xaero-Profil"),
         MenuAction::NextXaeroProfile,
     ));
+    items.push((
+        tr("Build map from world save", "Построить карту по сохранению", "Construire la carte depuis la sauvegarde",
+            "Construir mapa desde el mundo guardado", "Karte aus Welt-Spielstand erstellen"),
+        MenuAction::ScanSave,
+    ));
     items
 }
 
@@ -1656,7 +1667,7 @@ fn menu_layout(
     for (label, _) in items {
         width = width.max(game.map_text_width(label));
     }
-    let width = (width + 18.0).clamp(160.0, 340.0);
+    let width = (width + 24.0).clamp(160.0, 340.0).min((size[0] - 12.).max(1.));
     let header = MENU_HEADER
         + if subtitle.is_some() {
             MENU_SUBLINE
@@ -1796,6 +1807,22 @@ fn perform_menu(game: &Game<'_>, state: &mut State, menu: Menu, action: MenuActi
                 state.session, menu.dimension, source, read,
             ) {
                 Ok(reply) => state.cache_import = Some(reply),
+                Err(error) => state.notice = Some((error, Instant::now())),
+            }
+        }
+        MenuAction::ScanSave => {
+            if state.cache_import.is_some() { return; }
+            let controller = runtime::initialize(game.native_data_dir(runtime::MOD_ID));
+            let leaves = state.leaves.as_ref().map(|(_, leaves)| leaves.clone());
+            match super::minimap_save_scan::reader(game, leaves)
+                .and_then(|tiles| controller.maps.import_save(state.session, tiles))
+            {
+                Ok(reply) => {
+                    state.cache_import = Some(reply);
+                    state.notice = Some((tr("Reading saved regions…", "Читаю сохранённые регионы…",
+                        "Lecture des régions enregistrées…", "Leyendo regiones guardadas…",
+                        "Gespeicherte Regionen werden gelesen…").into(), Instant::now()));
+                }
                 Err(error) => state.notice = Some((error, Instant::now())),
             }
         }
@@ -2123,23 +2150,10 @@ fn draw_menu(game: &Game<'_>, batch: &mut HudBatch, state: &State) {
         &items,
     );
     let mouse = game.cursor();
-    let border = 0xff3a4553;
-    game.native_fill(batch, rect, 0xf01b2028);
-    game.native_fill(batch, [rect[0], rect[1], rect[2], 1.0], border);
-    game.native_fill(
-        batch,
-        [rect[0], rect[1] + rect[3] - 1.0, rect[2], 1.0],
-        border,
-    );
-    game.native_fill(batch, [rect[0], rect[1], 1.0, rect[3]], border);
-    game.native_fill(
-        batch,
-        [rect[0] + rect[2] - 1.0, rect[1], 1.0, rect[3]],
-        border,
-    );
+    ui_panel(game, batch, rect);
     game.map_text(
         batch,
-        &menu_title(menu),
+        &fit_text(game, &menu_title(menu), rect[2] - 16.),
         [rect[0] + 8.0, rect[1] + 5.0],
         0xffffff,
         true,
@@ -2147,9 +2161,9 @@ fn draw_menu(game: &Game<'_>, batch: &mut HudBatch, state: &State) {
     if let Some(subtitle) = subtitle.as_deref() {
         game.map_text(
             batch,
-            subtitle,
+            &fit_text(game, subtitle, rect[2] - 16.),
             [rect[0] + 8.0, rect[1] + MENU_HEADER - 3.0],
-            0xd8b0ff,
+            UI_ACCENT,
             false,
         );
     }
@@ -2157,13 +2171,14 @@ fn draw_menu(game: &Game<'_>, batch: &mut HudBatch, state: &State) {
     game.native_fill(
         batch,
         [rect[0] + 4.0, rect[1] + header - 1.0, rect[2] - 8.0, 1.0],
-        border,
+        UI_EDGE,
     );
     for ((label, _), row) in items.iter().zip(rows) {
         if inside(mouse, row) {
-            game.native_fill(batch, row, 0xff2e3a48);
+            game.native_fill(batch, row, UI_HOVER);
         }
-        game.map_text(batch, label, [row[0] + 7.0, row[1] + 4.0], 0xdddddd, false);
+        game.map_text(batch, &fit_text(game, label, row[2] - 14.),
+            [row[0] + 7.0, row[1] + 4.0], 0xffeee4da, false);
     }
 }
 
@@ -2193,11 +2208,40 @@ fn draw_notice(game: &Game<'_>, batch: &mut HudBatch, state: &State) {
     if since.elapsed() > Duration::from_secs(2) {
         return;
     }
-    let width = game.map_text_width(text);
+    let text = fit_text(game, text, batch.width - 24.);
+    let width = game.map_text_width(&text);
     let x = (batch.width - width) / 2.0;
-    let y = batch.height - 38.0;
-    game.native_fill(batch, [x - 7.0, y - 4.0, width + 14.0, 14.0], 0xd01b2028);
-    game.map_text(batch, text, [x, y], 0xffffd24a, true);
+    let y = batch.height - 83.0;
+    ui_panel(game, batch, [x - 7.0, y - 4.0, width + 14.0, 16.0]);
+    game.map_text(batch, &text, [x, y], UI_ACCENT, true);
+}
+
+pub(super) const UI_SURFACE: u32 = 0xf5272527;
+pub(super) const UI_EDGE: u32 = 0xff675d58;
+pub(super) const UI_ACCENT: u32 = 0xffeab979;
+const UI_SELECTED: u32 = 0xff53433a;
+const UI_HOVER: u32 = 0xff433c38;
+
+pub(super) fn ui_panel(game: &Game<'_>, batch: &mut HudBatch, rect: [f32; 4]) {
+    let [x, y, w, h] = rect;
+    game.native_fill(batch, rect, UI_SURFACE);
+    for edge in [[x, y, w, 1.], [x, y + h - 1., w, 1.], [x, y, 1., h], [x + w - 1., y, 1., h]] {
+        game.native_fill(batch, edge, UI_EDGE);
+    }
+}
+
+pub(super) fn draw_scroll_indicator(
+    game: &Game<'_>, batch: &mut HudBatch, rect: [f32; 4], total: usize,
+    visible: usize, start: usize,
+) {
+    if total <= visible || rect[3] < 16. { return; }
+    let track = rect[3] - 6.;
+    let thumb = (track * visible as f32 / total as f32).max(8.);
+    let fraction = start.min(total - visible) as f32 / (total - visible) as f32;
+    let x = rect[0] + rect[2] - 5.;
+    let y = rect[1] + 3.;
+    game.native_fill(batch, [x, y, 2., track], UI_EDGE);
+    game.native_fill(batch, [x, y + fraction * (track - thumb), 2., thumb], UI_ACCENT);
 }
 
 pub(super) fn button(
@@ -2208,21 +2252,20 @@ pub(super) fn button(
     mouse: [f32; 2],
     enabled: bool,
 ) {
-    let color = if !enabled {
-        0xff232a33
-    } else if inside(mouse, rect) {
-        0xff3a4a5c
-    } else {
-        0xff2a3542
-    };
-    game.native_fill(batch, rect, color);
-    let text_color = if enabled { 0xffffff } else { 0x707880 };
+    let [x, y, w, h] = rect;
+    let hover = enabled && inside(mouse, rect);
+    game.native_fill(batch, rect, if enabled { 0xff75655d } else { 0xff443d3b });
+    game.native_fill(batch, [x + 1., y + 1., (w - 2.).max(0.), (h - 2.).max(0.)],
+        if hover { UI_HOVER } else if enabled { 0xff332e2d } else { 0xff282526 });
+    if label.is_empty() { return; }
+    let label = fit_text(game, label, w - 6.);
+    let text_color = if hover { UI_ACCENT } else if enabled { 0xfffff3e7 } else { 0xffa59991 };
     game.map_text(
         batch,
-        label,
+        &label,
         [
-            rect[0] + (rect[2] - game.map_text_width(label)) / 2.0,
-            rect[1] + 4.0,
+            x + ((w - game.map_text_width(&label)) / 2.).floor(),
+            y + ((h - 8.) / 2.).floor(),
         ],
         text_color,
         false,
@@ -2246,23 +2289,24 @@ fn waypoint_on_map(game: &Game<'_>, state: &State, point: &Waypoint, include_hid
             || state.waypoint_group.as_ref().is_none_or(|group| *group == point.options.group))
 }
 
-fn show_hidden_on_map(state: &State, large: bool) -> bool {
-    large && state.map_panel == MapPanel::Waypoints && state.map_panel_hidden
+fn show_hidden_on_map(game: &Game<'_>, large: bool) -> bool {
+    large && game.map_option("world_show_disabled_waypoints") == Some(1)
 }
 
 fn waypoint_group_buttons(width: f32) -> [[f32;4];4] {
     let cell = ((width-36.)/4.).clamp(1.,150.);
     [
-        [width-cell-12.,29.,cell,17.],
+        [width-cell-12.,8.,cell,18.],
         [12.,29.,cell,17.],
         [16.+cell,29.,cell,17.],
         [20.+2.*cell,29.,cell,17.],
     ]
 }
 
-fn waypoint_header(width:f32)->[[f32;4];3] {
-    let w=((width-34.)/3.).clamp(1.,120.);
-    [[width-3.*w-20.,6.,w,18.],[width-2.*w-16.,6.,w,18.],[width-w-12.,6.,w,18.]]
+fn waypoint_footer(width: f32, height: f32) -> [[f32; 4]; 3] {
+    let w = ((width - 32.) / 3.).clamp(1., 122.);
+    let x = (width - 3. * w - 8.) * 0.5;
+    std::array::from_fn(|i| [x + i as f32 * (w + 4.), height - 26., w, 18.])
 }
 
 fn waypoint_filters(width:f32)->[[f32;4];3] {
@@ -2332,11 +2376,12 @@ fn waypoint_scope_rect(row: [f32; 4]) -> [f32; 4] {
 
 // Shared by drawing and hit testing, including narrow GUI viewports.
 fn waypoint_actions(width: f32, height: f32) -> [[f32; 4]; 6] {
-    let button_width = ((width - 54.0) / 6.0).max(1.0);
+    let button_width = ((width - 54.) / 6.).clamp(1., 110.);
+    let x = (width - 6. * button_width - 30.) * 0.5;
     std::array::from_fn(|i| {
         [
-            12.0 + i as f32 * (button_width + 6.0),
-            height - 42.0,
+            x + i as f32 * (button_width + 6.0),
+            height - 48.0,
             button_width,
             18.0,
         ]
@@ -2467,33 +2512,28 @@ fn apply_map_focus(state: &mut State, large: bool, selected: Dimension) {
 }
 
 fn draw_waypoints_screen(game: &Game<'_>, batch: &mut HudBatch, state: &State) {
-    game.native_fill(batch, [0.0, 0.0, batch.width, batch.height], 0xa611151b);
+    game.native_fill(batch, [0., 0., batch.width, batch.height], 0xd21d1a1a);
+    let title = tr("Waypoints", "Метки", "Repères", "Marcadores", "Wegpunkte");
     game.map_text(
         batch,
-        tr(
-            "Waypoints",
-            "Вейпоинты",
-            "Repères",
-            "Marcadores",
-            "Wegpunkte",
-        ),
-        [12.0, 8.0],
-        0xffffff,
+        title,
+        [((batch.width - game.map_text_width(title)) / 2.).floor(), 11.],
+        0xfffff3e7,
         true,
     );
     let mouse = game.cursor();
-    let [options,create,back]=waypoint_header(batch.width);
+    let [options,create,back] = waypoint_footer(batch.width, batch.height);
     button(game,batch,options,tr("Settings","Настройки","Options","Opciones","Optionen"),mouse,true);
     button(
         game,
         batch,
         create,
         tr(
-            "Create here",
-            "Создать здесь",
-            "Créer ici",
-            "Crear aquí",
-            "Hier erstellen",
+            "Add waypoint",
+            "Добавить метку",
+            "Ajouter un repère",
+            "Añadir marcador",
+            "Wegpunkt hinzufügen",
         ),
         mouse,
         true,
@@ -2502,11 +2542,10 @@ fn draw_waypoints_screen(game: &Game<'_>, batch: &mut HudBatch, state: &State) {
         game,
         batch,
         back,
-        tr("Back", "Назад", "Retour", "Volver", "Zurück"),
+        tr("Done", "Готово", "Terminé", "Listo", "Fertig"),
         mouse,
         true,
     );
-    game.native_fill(batch, [12.0, 28.0, batch.width - 24.0, 1.0], 0xff3a4553);
     let [group_rect,create_group,rename_group,remove_group] = waypoint_group_buttons(batch.width);
     let group = group_label(state.waypoint_group.as_deref());
     button(game,batch,group_rect,&fit_text(game,&format!("{group} ▾"),group_rect[2]-8.),mouse,true);
@@ -2520,7 +2559,10 @@ fn draw_waypoints_screen(game: &Game<'_>, batch: &mut HudBatch, state: &State) {
         button(game,batch,rect,&fit_text(game,label,rect[2]-8.),mouse,enabled);
     }
     let [search,dimension,sort]=waypoint_filters(batch.width);
-    game.native_fill(batch,search,if state.waypoint_search_focus {0xff355464} else {0xff253744});
+    ui_panel(game, batch, search);
+    if state.waypoint_search_focus {
+        game.native_fill(batch, [search[0] + 1., search[1] + 1., search[2] - 2., 1.], UI_ACCENT);
+    }
     let hint=tr("Search waypoints…","Поиск метки…","Rechercher un repère…","Buscar marcador…","Wegpunkt suchen…");
     let search_text=if state.waypoint_search.is_empty(){hint}else{&state.waypoint_search};
     game.map_text(batch,&fit_text(game,search_text,search[2]-12.),[search[0]+6.,search[1]+5.],
@@ -2535,19 +2577,26 @@ fn draw_waypoints_screen(game: &Game<'_>, batch: &mut HudBatch, state: &State) {
         _=>tr("Added order","По созданию","Par création","Por creación","Nach Erstellung"),
     };
     button(game,batch,sort,&fit_text(game,sort_label,sort[2]-8.),mouse,true);
-    if listed_waypoints(game,state).is_empty() {
+    let list_rect = [10., 72., batch.width - 20., (batch.height - 149.).max(38.)];
+    ui_panel(game, batch, list_rect);
+    let total = listed_waypoints(game, state).len();
+    let visible = waypoint_visible_rows(batch.height);
+    if total == 0 {
         game.map_text(batch,tr("No matching waypoints","Нет подходящих меток","Aucun repère trouvé","No hay marcadores coincidentes","Keine passenden Wegpunkte"),
             [16.,83.],0xffadbcc7,true);
     }
     let mut biome_tooltip = None;
-    for (index, waypoint,row) in visible_waypoint_rows(game,state,batch.width,batch.height) {
+    for (i, (index, waypoint, row)) in visible_waypoint_rows(game,state,batch.width,batch.height).enumerate() {
         let selected = state.waypoint_bulk.as_ref().map_or(
             state.waypoint_selected == Some(waypoint.key()), |keys| keys.contains(&waypoint.key()));
 
         if selected {
-            game.native_fill(batch, row, 0xff2e4a3a);
+            game.native_fill(batch, row, UI_SELECTED);
+            game.native_fill(batch, [row[0], row[1], 2., row[3]], UI_ACCENT);
         } else if inside(mouse, row) {
-            game.native_fill(batch, row, 0xff222b35);
+            game.native_fill(batch, row, UI_HOVER);
+        } else if i % 2 == 1 {
+            game.native_fill(batch, row, 0xff302c2c);
         }
         let letter_x = row[0] + 6.0;
         if waypoint.icon == runtime::WaypointIcon::Skull {
@@ -2621,28 +2670,18 @@ fn draw_waypoints_screen(game: &Game<'_>, batch: &mut HudBatch, state: &State) {
         let disabled = [toggle[0] - 24.0, toggle[1], 20.0, 18.0];
         let scope = waypoint_scope_rect(row);
         let scope_label = if waypoint.options.visibility % 2 == 1 {
-            tr("Global", "Глобальная", "Global", "Global", "Global")
+            tr("Global", "Везде", "Global", "Global", "Global")
         } else {
-            tr("Local", "Локальная", "Local", "Local", "Lokal")
+            tr("Local", "Рядом", "Local", "Local", "Lokal")
         };
         button(game, batch, scope, &fit_text(game, scope_label, scope[2] - 6.), mouse, true);
         button(game, batch, disabled, if waypoint.options.disabled { "○" } else { "●" }, mouse, true);
-        game.native_fill(batch, toggle, if on { 0xff2e7d52 } else { 0xff2a3542 });
-        if inside(mouse, toggle) {
-            game.native_fill(batch, toggle, 0xff3a4a5c);
+        button(game, batch, toggle, "3D", mouse, true);
+        if on {
+            game.native_fill(batch, [toggle[0] + 2., toggle[1] + toggle[3] - 2., toggle[2] - 4., 1.], UI_ACCENT);
         }
-        let label = tr("3D", "3D", "3D", "3D", "3D");
-        game.map_text(
-            batch,
-            label,
-            [
-                toggle[0] + (toggle[2] - game.map_text_width(label)) / 2.0,
-                toggle[1] + 3.0,
-            ],
-            if on { 0xffffff } else { 0x707880 },
-            false,
-        );
     }
+    draw_scroll_indicator(game, batch, list_rect, total, visible, state.waypoint_scroll);
     let selected = selected_waypoint(state);
     let [rename, delete, show, share, paste, chat] = waypoint_actions(batch.width, batch.height);
     let count = state.waypoint_bulk.as_ref().map_or(0, BTreeSet::len);
@@ -2651,7 +2690,7 @@ fn draw_waypoints_screen(game: &Game<'_>, batch: &mut HudBatch, state: &State) {
         localized_format!("Finish selecting ({})", "Завершить выбор ({})", "Terminer la sélection ({})",
             "Terminar selección ({})", "Auswahl beenden ({})", count)
     } else {
-        tr("Select multiple", "Выбрать несколько", "Sélection multiple", "Seleccionar varios", "Mehrfachauswahl").to_owned()
+        tr("Select multiple", "Выбор меток", "Sélection multiple", "Seleccionar varios", "Mehrfachauswahl").to_owned()
     };
     let three_d = bulk_three_d_value(state);
     for (rect, (label, enabled)) in waypoint_bulk_actions(batch.width, batch.height).into_iter().zip([
@@ -2678,7 +2717,7 @@ fn draw_waypoints_screen(game: &Game<'_>, batch: &mut HudBatch, state: &State) {
         batch,
         delete,
         if state.waypoint_confirm_delete {
-            tr("Confirm delete", "Подтвердить удаление", "Confirmer", "Confirmar", "Löschen bestätigen")
+            tr("Confirm delete", "Подтвердить", "Confirmer", "Confirmar", "Bestätigen")
         } else {
             tr("Delete", "Удалить", "Supprimer", "Eliminar", "Löschen")
         },
@@ -2691,7 +2730,7 @@ fn draw_waypoints_screen(game: &Game<'_>, batch: &mut HudBatch, state: &State) {
         show,
         tr(
             "Show on map",
-            "Показать на карте",
+            "На карте",
             "Voir sur la carte",
             "Ver en el mapa",
             "Auf Karte zeigen",
@@ -2701,7 +2740,7 @@ fn draw_waypoints_screen(game: &Game<'_>, batch: &mut HudBatch, state: &State) {
     );
     button(game, batch, share, tr("Copy link", "Копировать", "Copier le lien", "Copiar enlace", "Link kopieren"), mouse, selected.is_some());
     button(game, batch, paste, tr("Paste link", "Вставить", "Coller le lien", "Pegar enlace", "Link einfügen"), mouse, true);
-    button(game, batch, chat, tr("Open in chat", "Открыть в чате", "Ouvrir dans le chat",
+    button(game, batch, chat, tr("Open in chat", "В чат", "Ouvrir dans le chat",
         "Abrir en el chat", "Im Chat öffnen"), mouse, selected.is_some());
     draw_notice(game, batch, state);
     if let Some(label) = biome_tooltip {
@@ -2739,12 +2778,20 @@ fn group_field(rect: [f32; 4]) -> [f32; 4] {
 }
 
 fn color_swatch_at(rect: [f32; 4], index: usize) -> [f32; 4] {
+    let step = ((rect[2] - 24.) / runtime::WAYPOINT_COLORS.len() as f32).min(22.);
     [
-        rect[0] + 10.0 + index as f32 * 22.0,
+        rect[0] + 12. + index as f32 * step,
         rect[1] + 91.0,
-        18.0,
+        (step - 4.).max(1.),
         18.0,
     ]
+}
+
+fn name_buttons(rect: [f32; 4]) -> [[f32; 4]; 2] {
+    let w = ((rect[2] - 26.) * 0.5).clamp(1., 90.);
+    let center = rect[0] + rect[2] * 0.5;
+    let y = rect[1] + rect[3] - 27.;
+    [[center - w - 3., y, w, 20.], [center + 3., y, w, 20.]]
 }
 
 fn draw_name_form(game: &Game<'_>, batch: &mut HudBatch, state: &State, form: &NameForm) {
@@ -2756,13 +2803,7 @@ fn draw_name_form(game: &Game<'_>, batch: &mut HudBatch, state: &State, form: &N
     }
     game.native_fill(batch, [0.0, 0.0, batch.width, batch.height], 0x70000000);
     let rect = name_form_rect(batch.width, batch.height);
-    game.native_fill(batch, rect, 0xf01b2028);
-    game.native_fill(batch, [rect[0], rect[1], rect[2], 1.0], 0xff3a4553);
-    game.native_fill(
-        batch,
-        [rect[0], rect[1] + rect[3] - 1.0, rect[2], 1.0],
-        0xff3a4553,
-    );
+    ui_panel(game, batch, rect);
     game.map_text(
         batch,
         if form.group_edit.is_some() {
@@ -2789,10 +2830,10 @@ fn draw_name_form(game: &Game<'_>, batch: &mut HudBatch, state: &State, form: &N
         true,
     );
     let field = [rect[0] + 10.0, rect[1] + 26.0, rect[2] - 20.0, 18.0];
-    game.native_fill(batch, field, 0xff0d1117);
+    ui_panel(game, batch, field);
     game.map_text(
         batch,
-        &format!("{}{}", form.text, if form.group_focused { "" } else { "_" }),
+        &fit_text(game, &format!("{}{}", form.text, if form.group_focused { "" } else { "_" }), field[2] - 8.),
         [field[0] + 4.0, field[1] + 5.0],
         0xffffff,
         false,
@@ -2800,7 +2841,7 @@ fn draw_name_form(game: &Game<'_>, batch: &mut HudBatch, state: &State, form: &N
     if form.group_edit.is_none() {
     let group = group_field(rect);
     game.map_text(batch, tr("Group", "Группа", "Groupe", "Grupo", "Gruppe"), [group[0], group[1]-10.0], 0xaaaaaa, false);
-    game.native_fill(batch, group, 0xff0d1117);
+    ui_panel(game, batch, group);
     let value = fit_text(game, &form.group, group[2]-12.0);
     game.map_text(batch, &format!("{value}{}", if form.group_focused { "_" } else { "" }), [group[0]+4.0, group[1]+5.0], 0xffffff, false);
     game.map_text(
@@ -2821,25 +2862,14 @@ fn draw_name_form(game: &Game<'_>, batch: &mut HudBatch, state: &State, form: &N
                     swatch[2] + 4.0,
                     swatch[3] + 4.0,
                 ],
-                0xffffffff,
+                UI_ACCENT,
             );
         }
         game.native_fill(batch, swatch, waypoint_argb(color));
     }
     }
     let mouse = game.cursor();
-    let save = [
-        rect[0] + rect[2] - 184.0,
-        rect[1] + rect[3] - 24.0,
-        80.0,
-        18.0,
-    ];
-    let cancel = [
-        rect[0] + rect[2] - 96.0,
-        rect[1] + rect[3] - 24.0,
-        80.0,
-        18.0,
-    ];
+    let [save, cancel] = name_buttons(rect);
     button(
         game,
         batch,
@@ -2871,12 +2901,13 @@ fn draw_name_form(game: &Game<'_>, batch: &mut HudBatch, state: &State, form: &N
     );
 }
 
-fn draw_tooltip(game: &Game<'_>, batch: &mut HudBatch, text: &str, at: [f32; 2]) {
-    let width = game.map_text_width(text);
+pub(super) fn draw_tooltip(game: &Game<'_>, batch: &mut HudBatch, text: &str, at: [f32; 2]) {
+    let text = fit_text(game, text, batch.width - 20.);
+    let width = game.map_text_width(&text);
     let x = (at[0] + 10.0).min(batch.width - width - 10.0).max(4.0);
     let y = (at[1] - 18.0).max(4.0);
-    game.native_fill(batch, [x - 4.0, y - 3.0, width + 8.0, 13.0], 0xf01b2028);
-    game.map_text(batch, text, [x, y], 0xffffd24a, true);
+    ui_panel(game, batch, [x - 4., y - 3., width + 8., 14.]);
+    game.map_text(batch, &text, [x, y], UI_ACCENT, true);
 }
 
 // Hit-test the full short label of the waypoint under the map pointer.
@@ -2892,7 +2923,7 @@ fn waypoint_at_pointer<'a>(
         .iter()
         .enumerate()
         .find(|(index, waypoint)| {
-            if waypoint.dimension != view.dimension || !waypoint_on_map(game, state, waypoint, show_hidden_on_map(state, view.large)) {
+            if waypoint.dimension != view.dimension || !waypoint_on_map(game, state, waypoint, show_hidden_on_map(game, view.large)) {
                 return false;
             }
             let pixel = view.screen_at([f64::from(waypoint.x) + 0.5, f64::from(waypoint.z) + 0.5]);
@@ -2974,13 +3005,20 @@ fn draw_world_box(
     );
 }
 
+fn claim_colors(game: &Game<'_>, large: bool, own: bool) -> (u32, u32) {
+    let fill = game.map_option(if large { "world_claim_fill" } else { "minimap_claim_fill" }).unwrap_or(46);
+    let border = game.map_option(if large { "world_claim_border" } else { "minimap_claim_border" }).unwrap_or(80);
+    let color = if own { 0x5ddd91 } else { 0xffac69 };
+    let argb = |percent| ((u32::from(percent) * 255 / 100) << 24) | color;
+    (argb(fill), argb(border))
+}
+
 fn draw_claims(game: &Game<'_>, batch: &mut HudBatch, state: &State, view: &View, rect: [f32; 4]) {
     if game.map_option(if view.large { "world_claims" } else { "minimap_claims" }) == Some(0) {
         return;
     }
-    let fill = game.map_option(if view.large { "world_claim_fill" } else { "minimap_claim_fill" }).unwrap_or(46);
-    let border = game.map_option(if view.large { "world_claim_border" } else { "minimap_claim_border" }).unwrap_or(80);
-    let opacity = |percent| (u32::from(percent) * 255 / 100) << 24;
+    let own_colors = claim_colors(game, view.large, true);
+    let other_colors = claim_colors(game, view.large, false);
     let region = view.atlas_region();
     let chunk_at = |x: i64| x.div_euclid(16) as i32;
     let min = [chunk_at(region[0]), chunk_at(region[1])];
@@ -3000,12 +3038,12 @@ fn draw_claims(game: &Game<'_>, batch: &mut HudBatch, state: &State, view: &View
         let points = maps::terrain_polygon(view, [x, z, 16, 16], [0.; 4]);
         let points: Vec<_> = points.into_iter().map(|p| [rect[0]+(p[0] as f32+0.5)*rect[2], rect[1]+(p[1] as f32+0.5)*rect[3]]).collect();
         if points.len() < 3 { continue; }
-        let color = if own { 0x5ddd91 } else { 0xffac69 };
+        let (fill, border) = if own { own_colors } else { other_colors };
         for i in 1..points.len()-1 {
-            game.native_quad(batch, [points[0], points[i], points[i+1], points[i+1]], opacity(fill) | color);
+            game.native_quad(batch, [points[0], points[i], points[i+1], points[i+1]], fill);
         }
         for i in 0..points.len() {
-            draw_line(game, batch, points[i], points[(i+1)%points.len()], rect, opacity(border) | color);
+            draw_line(game, batch, points[i], points[(i+1)%points.len()], rect, border);
         }
     }
 }
@@ -3709,6 +3747,15 @@ fn cave_allowed(game:&Game<'_>,large:bool,dimension:Dimension)->bool {
     game.map_option(key)!=Some(0)
 }
 
+fn manual_cave_y(game: &Game<'_>, large: bool, minimap_y: i32) -> i32 {
+    if large {
+        game.map_number("world_cave_y").filter(|height| *height < 320.)
+            .map_or(minimap_y, |height| height as i32)
+    } else {
+        minimap_y
+    }
+}
+
 fn terrain_appearance(game: &Game<'_>, large: bool) -> maps::Appearance {
     use maps::Appearance as A;
     let mut appearance = 0;
@@ -3743,6 +3790,226 @@ fn terrain_appearance(game: &Game<'_>, large: bool) -> maps::Appearance {
         appearance |= A::LIGHTING;
     }
     A(appearance)
+}
+
+pub(super) fn sample_chunk_tile(
+    snapshot: &super::minimap_compat::Snapshot,
+    resources: &super::Resources,
+    biome_palette: &horizon_client::biome::Biomes,
+    leaves: Option<&LeafPalette>,
+    pos: (i32, i32),
+    layer: Layer,
+    appearance: maps::Appearance,
+) -> (maps::Tile, Option<(maps::Appearance, maps::Tile)>) {
+    let book = resources.facts();
+    let minimum = snapshot.height().start;
+    use maps::Appearance as A;
+    let sample = |style: A| {
+        let mut names = BTreeMap::<u16, Arc<str>>::new();
+        maps::sample_with_biomes(
+            |x, y, z| {
+                let id = snapshot.block([x, y, z]);
+                let air = book.is_air(id);
+                let Some(state) = book.states.get(id.0 as usize) else {
+                    return maps::Block {
+                        rgb: 0,
+                        air,
+                        alpha: 0,
+                        hidden: false,
+                        water: false,
+                        portal: None,
+                    };
+                };
+                let name = state.name.as_ref();
+                let class = |name| state.classes.iter().any(|class| class.as_ref() == name);
+                let stained_glass = name.contains("stained_glass");
+                let redstone = matches!(name, "minecraft:redstone_wire" | "minecraft:redstone_torch" | "minecraft:redstone_wall_torch" | "minecraft:repeater" | "minecraft:comparator");
+                let flower = class("FlowerBlock") || class("TallFlowerBlock")
+                    || matches!(name, "minecraft:torchflower" | "minecraft:pitcher_plant" | "minecraft:pink_petals" | "minecraft:wildflowers" | "minecraft:flowerbed");
+                let hidden = (hidden_cover(state.classes.as_ref(), name)
+                    && !flower)
+                    || (style.has(A::HIDE_FLOWERS) && flower)
+                    || (style.has(A::HIDE_REDSTONE) && redstone)
+                    || (style.has(A::HIDE_STAINED_GLASS) && stained_glass);
+                let portal = match state.name.as_ref() {
+                    "minecraft:nether_portal" => Some(Portal::Nether),
+                    "minecraft:end_portal" => Some(Portal::End),
+                    "minecraft:end_gateway" => Some(Portal::Gateway),
+                    _ => None,
+                };
+                if air || hidden {
+                    return maps::Block {
+                        rgb: 0,
+                        air,
+                        alpha: 0,
+                        hidden,
+                        water: false,
+                        portal: None,
+                    };
+                }
+                if let Some(kind) = portal {
+                    let (rgb, alpha) = portal_tint(kind);
+                    return maps::Block {
+                        rgb,
+                        air,
+                        alpha,
+                        hidden: false,
+                        water: false,
+                        portal: Some(kind),
+                    };
+                }
+                let water = matches!(state.fluid, horizon_client::blocks::Fluid::Water);
+                let fluid = !matches!(state.fluid, horizon_client::blocks::Fluid::None);
+                let invisible = matches!(
+                    state.render_shape,
+                    horizon_client::blocks::RenderShape::Invisible
+                );
+                if invisible && !fluid {
+                    // Barriers, light blocks, moving pistons and
+                    // other render-invisible blocks leave no pixel.
+                    return maps::Block {
+                        rgb: 0,
+                        air,
+                        alpha: 0,
+                        hidden: true,
+                        water: false,
+                        portal: None,
+                    };
+                }
+                let base = horizon_client::blocks::MAP_COLORS
+                    .get(state.map_color as usize)
+                    .copied()
+                    .unwrap_or(0);
+                let leaf = leaves
+                    .as_ref()
+                    .and_then(|leaves| leaves.states.get(&id.0))
+                    .copied();
+                let needs_grass = leaf.is_some_and(|leaf| leaf.tint == LeafTint::Grass)
+                    || maps::needs_grass_tint(state.name.as_ref());
+                let needs_foliage = leaf
+                    .is_some_and(|leaf| leaf.tint == LeafTint::Foliage)
+                    || maps::needs_foliage_tint(state.name.as_ref());
+                let tint_biomes = !style.has(A::VANILLA) || style.has(A::VANILLA_BIOMES);
+                let blend = blend_biome_tints(
+                    &biome_palette,
+                    [x, z],
+                    if style.has(A::HARD_BIOME_EDGES) { 0 } else { BIOME_BLEND_RADIUS },
+                    BIOME_BLEND_STEP,
+                    tint_biomes && needs_grass,
+                    tint_biomes && needs_foliage,
+                    tint_biomes && water,
+                    |wx, wz| snapshot.biome([wx, y, wz]).map(|biome| biome.0),
+                );
+                let rgb = if redstone && base == 0 && !style.has(A::VANILLA) {
+                    0xad160a
+                } else if water {
+                    blend
+                        .water
+                        .unwrap_or_else(|| if base == 0 { 0x3f76e4 } else { base })
+                } else if style.has(A::VANILLA) {
+                    blend.grass.or(blend.foliage).unwrap_or(base)
+                } else {
+                    leaf.and_then(|leaf| leaf.map_color(blend.grass, blend.foliage))
+                        .unwrap_or_else(|| {
+                            plant_color(state.name.as_ref()).unwrap_or_else(|| {
+                                maps::block_map_color(
+                                    state.name.as_ref(),
+                                    base,
+                                    blend.grass,
+                                    blend.foliage,
+                                )
+                            })
+                        })
+                };
+                let glass = state.classes.iter().any(|class| {
+                    class.as_ref() == "TransparentBlock"
+                        || class.as_ref() == "HalfTransparentBlock"
+                }) || state.name.contains("glass");
+                let soft = matches!(
+                    state.name.as_ref(),
+                    "minecraft:scaffolding" | "minecraft:cobweb"
+                );
+                let (rgb, mut alpha) = if water {
+                    (if rgb == 0 { 0x3f76e4 } else { rgb }, 120)
+                } else if glass {
+                    let tint = if rgb == 0 {
+                        dye_color(state.name.as_ref()).unwrap_or(0xbfd8e6)
+                    } else {
+                        rgb
+                    };
+                    let alpha = match state.name.as_ref() {
+                        "minecraft:tinted_glass" => 190,
+                        "minecraft:ice"
+                        | "minecraft:blue_ice"
+                        | "minecraft:frosted_ice" => 130,
+                        _ if state.name.contains("glass_pane") => 80,
+                        _ => 96,
+                    };
+                    (tint, alpha)
+                } else if soft {
+                    (if rgb == 0 { 0xbfb8a8 } else { rgb }, 90)
+                } else {
+                    (rgb, 0)
+                };
+                if style.has(A::OPAQUE) {
+                    alpha = 0;
+                }
+                maps::Block {
+                    rgb,
+                    air,
+                    alpha,
+                    hidden: false,
+                    water,
+                    portal: None,
+                }
+            },
+            |x, z| snapshot.section_top([x, z]),
+            [pos.0, pos.1],
+            minimum,
+            layer,
+            |at| {
+                let id = snapshot.biome(at)?.0;
+                let info = biome_palette.list.get(id as usize)?;
+                Some(
+                    names
+                        .entry(id)
+                        .or_insert_with(|| Arc::from(info.name.as_str()))
+                        .clone(),
+                )
+            },
+        )
+    };
+    let base = sample(A::default());
+    let alternate = (appearance != A::default()).then(|| {
+        let adjusted = appearance.0 & !(A::SHORT_HEIGHT | A::LIGHTING);
+        let mut tile = if adjusted == 0 { base.clone() } else { sample(A(adjusted)) };
+        for (i, height) in tile.heights.iter_mut().enumerate() {
+            if tile.pixels[i * 4 + 3] == 0 {
+                continue;
+            }
+            let x = pos.0 * 16 + i as i32 % 16;
+            let z = pos.1 * 16 + i as i32 / 16;
+            if appearance.has(A::LIGHTING) {
+                let light = snapshot.light([x, *height + 1, z]);
+                let level = (light & 15).max(light >> 4);
+                if level < 15 {
+                    let shade = 96 + u16::from(level) * 159 / 15;
+                    for channel in &mut tile.pixels[i * 4..i * 4 + 3] {
+                        *channel = (u16::from(*channel) * shade / 255) as u8;
+                    }
+                }
+            }
+            if appearance.has(A::SHORT_HEIGHT)
+                && let Some(block) = book.states.get(snapshot.block([x, *height, z]).0 as usize)
+                && !block.outline.is_empty()
+                && block.outline.iter().all(|bounds| bounds[4] <= 0.25)
+            {
+                *height -= 1;
+            }
+        }
+        (appearance, tile)
+    });
+    (base, alternate)
 }
 
 pub(super) fn frame(game: &mut Game<'_>, elapsed: Duration) {
@@ -3848,17 +4115,30 @@ pub(super) fn frame(game: &mut Game<'_>, elapsed: Duration) {
         }
     }
     if let Some(request) = runtime::take_screen_request() {
+        use runtime::ScreenRequest::*;
         let desired = match request {
-            runtime::ScreenRequest::Map | runtime::ScreenRequest::Slime => Mode::Map,
-            runtime::ScreenRequest::Waypoints => Mode::Waypoints,
-            runtime::ScreenRequest::Create if state.large => Mode::Map,
-            runtime::ScreenRequest::Create => Mode::Waypoints,
-            runtime::ScreenRequest::Settings | runtime::ScreenRequest::SettingsOverlay => Mode::Settings,
+            Map | MapOverlay | Slime => Mode::Map,
+            Waypoints | WaypointsOverlay => Mode::Waypoints,
+            Create if state.large => Mode::Map,
+            Create => Mode::Waypoints,
+            Settings | SettingsOverlay => Mode::Settings,
         };
         // The key helper opens the screen; this side only chooses its mode.
         if game.mod_screen() == Some(runtime::MOD_ID) {
-            if matches!(request,runtime::ScreenRequest::Settings|runtime::ScreenRequest::SettingsOverlay) {
-                let back = if request == runtime::ScreenRequest::Settings {
+            if request == SettingsOverlay && state.mode == Mode::Settings {
+                close_settings(&mut state);
+                return;
+            }
+            if request == MapOverlay && state.mode == Mode::Map {
+                state.close = true;
+                return;
+            }
+            if request == WaypointsOverlay && state.mode == Mode::Waypoints {
+                close_waypoints(&mut state);
+                return;
+            }
+            if matches!(request, Settings | SettingsOverlay) {
+                let back = if request == Settings {
                     None
                 } else {
                     match state.mode {
@@ -3868,9 +4148,12 @@ pub(super) fn frame(game: &mut Game<'_>, elapsed: Duration) {
                         _ => None,
                     }
                 };
-                let tab = back.map_or(0, |mode| if mode == Mode::Map {1} else {2});
+                let tab = if back == Some(Mode::Waypoints) { 2 } else { 0 };
                 open_settings(&mut state,back,tab);
             } else {
+                state.waypoints_back_to_map = request == WaypointsOverlay
+                    && (state.mode == Mode::Map || state.settings_return == Some(Mode::Map));
+                state.settings_return = None;
                 state.mode = desired;
             }
             state.map_panel = MapPanel::None;
@@ -4045,7 +4328,7 @@ pub(super) fn frame(game: &mut Game<'_>, elapsed: Duration) {
     let layer=if cave_allowed(game,large,dimension) {
         match cave_view {
             CaveView::Underground=>Layer::Below(head),
-            CaveView::Manual=>Layer::Below(settings.cave_y),
+            CaveView::Manual=>Layer::Below(manual_cave_y(game, large, settings.cave_y)),
             CaveView::Auto if state.cave_open[index]=>Layer::Below(head),
             _=>Layer::Surface,
         }
@@ -4466,217 +4749,7 @@ pub(super) fn frame(game: &mut Game<'_>, elapsed: Duration) {
                 dimension,
                 layer,
                 [pos.0, pos.1],
-                move || {
-                    let book = resources.facts();
-                    let minimum = snapshot.height().start;
-                    use maps::Appearance as A;
-                    let sample = |style: A| {
-                        let mut names = BTreeMap::<u16, Arc<str>>::new();
-                        maps::sample_with_biomes(
-                            |x, y, z| {
-                                let id = snapshot.block([x, y, z]);
-                                let air = book.is_air(id);
-                                let Some(state) = book.states.get(id.0 as usize) else {
-                                    return maps::Block {
-                                        rgb: 0,
-                                        air,
-                                        alpha: 0,
-                                        hidden: false,
-                                        water: false,
-                                        portal: None,
-                                    };
-                                };
-                                let name = state.name.as_ref();
-                                let class = |name| state.classes.iter().any(|class| class.as_ref() == name);
-                                let stained_glass = name.contains("stained_glass");
-                                let redstone = matches!(name, "minecraft:redstone_wire" | "minecraft:redstone_torch" | "minecraft:redstone_wall_torch" | "minecraft:repeater" | "minecraft:comparator");
-                                let flower = class("FlowerBlock") || class("TallFlowerBlock")
-                                    || matches!(name, "minecraft:torchflower" | "minecraft:pitcher_plant" | "minecraft:pink_petals" | "minecraft:wildflowers" | "minecraft:flowerbed");
-                                let hidden = (hidden_cover(state.classes.as_ref(), name)
-                                    && !flower)
-                                    || (style.has(A::HIDE_FLOWERS) && flower)
-                                    || (style.has(A::HIDE_REDSTONE) && redstone)
-                                    || (style.has(A::HIDE_STAINED_GLASS) && stained_glass);
-                                let portal = match state.name.as_ref() {
-                                    "minecraft:nether_portal" => Some(Portal::Nether),
-                                    "minecraft:end_portal" => Some(Portal::End),
-                                    "minecraft:end_gateway" => Some(Portal::Gateway),
-                                    _ => None,
-                                };
-                                if air || hidden {
-                                    return maps::Block {
-                                        rgb: 0,
-                                        air,
-                                        alpha: 0,
-                                        hidden,
-                                        water: false,
-                                        portal: None,
-                                    };
-                                }
-                                if let Some(kind) = portal {
-                                    let (rgb, alpha) = portal_tint(kind);
-                                    return maps::Block {
-                                        rgb,
-                                        air,
-                                        alpha,
-                                        hidden: false,
-                                        water: false,
-                                        portal: Some(kind),
-                                    };
-                                }
-                                let water = matches!(state.fluid, horizon_client::blocks::Fluid::Water);
-                                let fluid = !matches!(state.fluid, horizon_client::blocks::Fluid::None);
-                                let invisible = matches!(
-                                    state.render_shape,
-                                    horizon_client::blocks::RenderShape::Invisible
-                                );
-                                if invisible && !fluid {
-                                    // Barriers, light blocks, moving pistons and
-                                    // other render-invisible blocks leave no pixel.
-                                    return maps::Block {
-                                        rgb: 0,
-                                        air,
-                                        alpha: 0,
-                                        hidden: true,
-                                        water: false,
-                                        portal: None,
-                                    };
-                                }
-                                let base = horizon_client::blocks::MAP_COLORS
-                                    .get(state.map_color as usize)
-                                    .copied()
-                                    .unwrap_or(0);
-                                let leaf = leaves
-                                    .as_ref()
-                                    .and_then(|leaves| leaves.states.get(&id.0))
-                                    .copied();
-                                let needs_grass = leaf.is_some_and(|leaf| leaf.tint == LeafTint::Grass)
-                                    || maps::needs_grass_tint(state.name.as_ref());
-                                let needs_foliage = leaf
-                                    .is_some_and(|leaf| leaf.tint == LeafTint::Foliage)
-                                    || maps::needs_foliage_tint(state.name.as_ref());
-                                let tint_biomes = !style.has(A::VANILLA) || style.has(A::VANILLA_BIOMES);
-                                let blend = blend_biome_tints(
-                                    &biome_palette,
-                                    [x, z],
-                                    if style.has(A::HARD_BIOME_EDGES) { 0 } else { BIOME_BLEND_RADIUS },
-                                    BIOME_BLEND_STEP,
-                                    tint_biomes && needs_grass,
-                                    tint_biomes && needs_foliage,
-                                    tint_biomes && water,
-                                    |wx, wz| snapshot.biome([wx, y, wz]).map(|biome| biome.0),
-                                );
-                                let rgb = if redstone && base == 0 && !style.has(A::VANILLA) {
-                                    0xad160a
-                                } else if water {
-                                    blend
-                                        .water
-                                        .unwrap_or_else(|| if base == 0 { 0x3f76e4 } else { base })
-                                } else if style.has(A::VANILLA) {
-                                    blend.grass.or(blend.foliage).unwrap_or(base)
-                                } else {
-                                    leaf.and_then(|leaf| leaf.map_color(blend.grass, blend.foliage))
-                                        .unwrap_or_else(|| {
-                                            plant_color(state.name.as_ref()).unwrap_or_else(|| {
-                                                maps::block_map_color(
-                                                    state.name.as_ref(),
-                                                    base,
-                                                    blend.grass,
-                                                    blend.foliage,
-                                                )
-                                            })
-                                        })
-                                };
-                                let glass = state.classes.iter().any(|class| {
-                                    class.as_ref() == "TransparentBlock"
-                                        || class.as_ref() == "HalfTransparentBlock"
-                                }) || state.name.contains("glass");
-                                let soft = matches!(
-                                    state.name.as_ref(),
-                                    "minecraft:scaffolding" | "minecraft:cobweb"
-                                );
-                                let (rgb, mut alpha) = if water {
-                                    (if rgb == 0 { 0x3f76e4 } else { rgb }, 120)
-                                } else if glass {
-                                    let tint = if rgb == 0 {
-                                        dye_color(state.name.as_ref()).unwrap_or(0xbfd8e6)
-                                    } else {
-                                        rgb
-                                    };
-                                    let alpha = match state.name.as_ref() {
-                                        "minecraft:tinted_glass" => 190,
-                                        "minecraft:ice"
-                                        | "minecraft:blue_ice"
-                                        | "minecraft:frosted_ice" => 130,
-                                        _ if state.name.contains("glass_pane") => 80,
-                                        _ => 96,
-                                    };
-                                    (tint, alpha)
-                                } else if soft {
-                                    (if rgb == 0 { 0xbfb8a8 } else { rgb }, 90)
-                                } else {
-                                    (rgb, 0)
-                                };
-                                if style.has(A::OPAQUE) {
-                                    alpha = 0;
-                                }
-                                maps::Block {
-                                    rgb,
-                                    air,
-                                    alpha,
-                                    hidden: false,
-                                    water,
-                                    portal: None,
-                                }
-                            },
-                            |x, z| snapshot.section_top([x, z]),
-                            [pos.0, pos.1],
-                            minimum,
-                            layer,
-                            |at| {
-                                let id = snapshot.biome(at)?.0;
-                                let info = biome_palette.list.get(id as usize)?;
-                                Some(
-                                    names
-                                        .entry(id)
-                                        .or_insert_with(|| Arc::from(info.name.as_str()))
-                                        .clone(),
-                                )
-                            },
-                        )
-                    };
-                    let base = sample(A::default());
-                    let alternate = (appearance != A::default()).then(|| {
-                        let adjusted = appearance.0 & !(A::SHORT_HEIGHT | A::LIGHTING);
-                        let mut tile = if adjusted == 0 { base.clone() } else { sample(A(adjusted)) };
-                        for (i, height) in tile.heights.iter_mut().enumerate() {
-                            if tile.pixels[i * 4 + 3] == 0 {
-                                continue;
-                            }
-                            let x = pos.0 * 16 + i as i32 % 16;
-                            let z = pos.1 * 16 + i as i32 / 16;
-                            if appearance.has(A::LIGHTING) {
-                                let light = snapshot.light([x, *height + 1, z]);
-                                let level = (light & 15).max(light >> 4);
-                                if level < 15 {
-                                    let shade = 96 + u16::from(level) * 159 / 15;
-                                    for channel in &mut tile.pixels[i * 4..i * 4 + 3] {
-                                        *channel = (u16::from(*channel) * shade / 255) as u8;
-                                    }
-                                }
-                            }
-                            if appearance.has(A::SHORT_HEIGHT)
-                                && let Some(block) = book.states.get(snapshot.block([x, *height, z]).0 as usize)
-                                && !block.outline.is_empty()
-                                && block.outline.iter().all(|bounds| bounds[4] <= 0.25)
-                            {
-                                *height -= 1;
-                            }
-                        }
-                        (appearance, tile)
-                    });
-                    (base, alternate)
-                },
+                move || sample_chunk_tile(&snapshot, &resources, &biome_palette, leaves.as_deref(), pos, layer, appearance),
             );
             if !accepted {
                 break;
@@ -4733,7 +4806,11 @@ pub(super) fn frame(game: &mut Game<'_>, elapsed: Duration) {
         };
         let selected_layer = if !cave_allowed(game,large,selected) || override_mode==0 {Layer::Surface}
             else if cave_view == CaveView::Manual {
-                Layer::Below(if large && game.map_option("world_cave_type") == Some(2) { maps::FULL_CAVE } else { settings.cave_y })
+                Layer::Below(if large && game.map_option("world_cave_type") == Some(2) {
+                    maps::FULL_CAVE
+                } else {
+                    manual_cave_y(game, large, settings.cave_y)
+                })
             }
             else {state.layers.get(&selected).copied().unwrap_or(Layer::Surface)};
         let view = View {
@@ -6007,7 +6084,7 @@ fn draw(
             .waypoints
             .iter()
             .enumerate()
-            .filter(|(_, waypoint)| waypoint.dimension == frame.view.dimension && waypoint_on_map(game, state, waypoint, show_hidden_on_map(state, large)))
+            .filter(|(_, waypoint)| waypoint.dimension == frame.view.dimension && waypoint_on_map(game, state, waypoint, show_hidden_on_map(game, large)))
             .filter(|_| game.map_option(if large {"world_map_waypoints"} else {"minimap_waypoints"}) != Some(0)
                 && (!large || f64::from(rect[2])/frame.view.span[0]>=game.map_number("world_waypoint_zoom_min").unwrap_or(0.)))
         {
@@ -6061,7 +6138,7 @@ fn draw(
 }
 
 fn tab(width: f32, index: usize) -> [f32; 4] {
-    let w = ((width - 16.0) / 4.0).clamp(1.0, 112.0);
+    let w = ((width - 48.0) / 4.0).clamp(1.0, 100.0);
     [8.0 + w * index as f32, 8.0, (w - 2.0).max(1.0), 24.0]
 }
 
@@ -6347,7 +6424,7 @@ fn information_lines(game: &Game<'_>, state: &State, menu: Menu, width: f32) -> 
 fn draw_information(game: &Game<'_>, batch: &mut HudBatch, state: &State, menu: Menu) {
     game.native_fill(batch, [0.0, 0.0, batch.width, batch.height], 0x98000000);
     let rect = information_rect(batch.width, batch.height);
-    game.native_fill(batch, rect, 0xff151d27);
+    ui_panel(game, batch, rect);
     game.map_text(
         batch,
         tr(
@@ -6403,8 +6480,32 @@ fn export_map_png(game: &Game<'_>, state: &mut State, dimension: Dimension) {
     let layer = state.frame.as_ref()
         .filter(|frame| frame.view.session == state.session && frame.view.dimension == dimension)
         .map_or(Layer::Surface, |frame| frame.view.layer);
+    let mut claims = BTreeMap::new();
+    if game.map_option("world_png_claims") == Some(1) && game.map_option("world_claims") != Some(0) {
+        let own = claim_colors(game, true, true);
+        let other = claim_colors(game, true, false);
+        for (&(layer, x, z), owner) in &state.claims {
+            if layer == dimension {
+                claims.insert((x, z), if owner.is_none() { own } else { other });
+            }
+        }
+        let own_uuid = game.own_uuid();
+        for chunk @ (_, x, z) in state.opac.chunks(dimension, [i32::MIN; 2], [i32::MAX; 2]) {
+            if let Some((owner, _)) = state.opac.owner(chunk) {
+                claims.insert((x, z), if owner == own_uuid { own } else { other });
+            }
+        }
+    }
+    let export = maps::PngExport {
+        dimension,
+        layer,
+        regions: game.map_option("world_png_regions") == Some(1),
+        night: dimension == Dimension::Overworld && layer == Layer::Surface && game.map_option("world_png_night") == Some(1),
+        max_edge: game.map_number("world_png_max_edge").unwrap_or(4096.) as u16,
+        claims,
+    };
     let maps = &runtime::initialize(game.native_data_dir(runtime::MOD_ID)).maps;
-    let text = match maps.export_png(state.session, dimension, layer, write_map_png) {
+    let text = match maps.export_png(state.session, export, write_map_png) {
         Ok(reply) => {
             state.export = Some(reply);
             tr(
@@ -6420,13 +6521,12 @@ fn export_map_png(game: &Game<'_>, state: &mut State, dimension: Dimension) {
     state.notice = Some((text, Instant::now()));
 }
 
-fn map_tools(width: f32, state: &State) -> impl Iterator<Item = [f32; 4]> + use<> {
-    let count = if state.base_world.starts_with("server:") { 6 } else { 5 };
-    let w = ((width - 14. - 2. * count as f32) / count as f32).clamp(1., 100.);
-    (0..count).map(move |i| {
-        let remaining = (count - i) as f32;
-        [width - 6. - remaining * (w + 2.), 60., w, 20.]
-    })
+fn map_tools(width: f32, height: f32, state: &State) -> impl Iterator<Item = (usize, [f32; 4])> + use<> {
+    let server = state.base_world.starts_with("server:");
+    [width - 30., 8., 34., 60., 86., width - 56., 112.]
+        .into_iter().enumerate()
+        .filter(move |(i, _)| *i != 5 || server)
+        .map(move |(i, x)| (i, [x, height - 30., 22., 22.]))
 }
 
 fn latest_death(state: &State) -> Option<&Waypoint> {
@@ -6435,13 +6535,13 @@ fn latest_death(state: &State) -> Option<&Waypoint> {
 }
 
 fn map_panel_rows(height: f32) -> usize {
-    (((height - 238.) / 20.).floor() as usize).clamp(1, 12)
+    (((height - 182.) / 20.).floor() as usize).clamp(1, if height < 400. { 4 } else { 8 })
 }
 
 fn map_panel_rect(width: f32, height: f32) -> [f32; 4] {
-    let w = (width - 16.).clamp(1., 228.);
-    let body = 20. * map_panel_rows(height) as f32 + 76.;
-    [width - w - 8., 84., w, body + 26.]
+    let w = (width * 0.52).clamp(1., 228.);
+    let body = 20. * map_panel_rows(height) as f32 + 102.;
+    [width - w - 8., (height - 34. - body).max(36.), w, body]
 }
 
 fn map_panel_row(panel: [f32; 4], index: usize) -> [f32; 4] {
@@ -6462,16 +6562,17 @@ fn map_panel_fields(panel: [f32; 4]) -> [[f32; 4]; 4] {
 fn map_panel_waypoints<'a>(game: &Game<'_>, state: &'a State) -> Vec<&'a Waypoint> {
     let query = state.waypoint_search.trim().to_lowercase();
     state.waypoints.iter().filter(|point| {
-        waypoint_on_map(game, state, point, state.map_panel_hidden)
+        waypoint_on_map(game, state, point, show_hidden_on_map(game, true))
             && (query.is_empty() || point.name.to_lowercase().contains(&query))
     }).collect()
 }
 
-fn visible_map_panel_waypoints<'a>(game: &Game<'_>, state: &'a State, height: f32) -> Vec<&'a Waypoint> {
+fn visible_map_panel_waypoints<'a>(game: &Game<'_>, state: &'a State, height: f32) -> (Vec<&'a Waypoint>, usize) {
     let points = map_panel_waypoints(game, state);
     let count = map_panel_rows(height);
-    let start = state.map_panel_scroll.min(points.len().saturating_sub(count));
-    points.into_iter().skip(start).take(count).collect()
+    let total = points.len();
+    let start = state.map_panel_scroll.min(total.saturating_sub(count));
+    (points.into_iter().skip(start).take(count).collect(), total)
 }
 
 const SETTING_CATEGORIES: usize = 5;
@@ -6519,18 +6620,26 @@ fn settings_tab(panel:[f32;4],i:usize)->[f32;4] {
     [panel[0]+10.+(width+1.)*i as f32,panel[1]+27.,width,22.]
 }
 
-fn settings_rows(panel:[f32;4])->usize {
-    (((panel[3]-94.)/25.).floor() as usize).max(1)
+fn settings_columns(panel: [f32; 4]) -> usize {
+    if panel[2] >= 570. { 2 } else { 1 }
 }
 
-fn settings_row(panel:[f32;4],i:usize)->([f32;4],[f32;4]) {
-    let row=[panel[0]+10.,panel[1]+56.+25.*i as f32,panel[2]-20.,22.];
-    let control=(row[2]*0.37).clamp(1.,210.);
-    (row,[row[0]+row[2]-control,row[1],control,row[3]])
+fn settings_rows(panel: [f32; 4]) -> usize {
+    (((panel[3] - 98.) / 24.).floor() as usize).max(1) * settings_columns(panel)
+}
+
+fn settings_row(panel: [f32; 4], i: usize) -> ([f32; 4], [f32; 4]) {
+    let cols = settings_columns(panel);
+    let w = (panel[2] - 24. - 6. * (cols - 1) as f32) / cols as f32;
+    let row = [panel[0] + 10. + (w + 6.) * (i % cols) as f32,
+        panel[1] + 56. + 24. * (i / cols) as f32, w, 21.];
+    let control = (row[2] * 0.36).clamp(1., 200.);
+    (row, [row[0] + row[2] - control, row[1], control, row[3]])
 }
 
 fn settings_back(panel:[f32;4])->[f32;4] {
-    [panel[0]+panel[2]-100.,panel[1]+panel[3]-28.,90.,20.]
+    let w = (panel[2] * 0.35).clamp(1., 136.);
+    [panel[0] + (panel[2] - w) * 0.5, panel[1] + panel[3] - 30., w, 22.]
 }
 
 fn setting_value(game: &Game<'_>, value:&horizon_client::mod_list::NativeSettingValue)->String {
@@ -6633,8 +6742,8 @@ fn placement_press(game: &Game<'_>, state: &mut State, screen: &mod_api::ScreenV
 
 fn settings_action(panel: [f32; 4]) -> [f32; 4] {
     let right = settings_back(panel)[0] - 5.;
-    let left = (right - 157.).max(panel[0] + 75.);
-    [left, panel[1] + panel[3] - 28., (right - left).max(1.), 20.]
+    let left = (right - 150.).max(panel[0] + 10.);
+    [left, panel[1] + panel[3] - 30., (right - left).max(1.), 22.]
 }
 
 fn draw_settings(game: &Game<'_>, batch: &mut HudBatch, state: &State) {
@@ -6648,43 +6757,54 @@ fn draw_settings(game: &Game<'_>, batch: &mut HudBatch, state: &State) {
     }
     if state.settings_return==Some(Mode::Map) {
         draw_map_screen(game,batch,state);
+    } else if state.settings_return==Some(Mode::Waypoints) {
+        draw_waypoints_screen(game,batch,state);
     }
     let panel=settings_panel(batch.width,batch.height);
     let mouse=game.cursor();
-    game.native_fill(batch,[0.,0.,batch.width,batch.height],0xd710171e);
-    game.native_fill(batch,panel,0xff23303b);
-    game.native_fill(batch,[panel[0],panel[1],panel[2],2.],0xff62d0c2);
-    game.map_text(batch,tr("Map settings","Настройки карт","Paramètres des cartes","Ajustes del mapa","Karteneinstellungen"),
-        [panel[0]+10.,panel[1]+10.],0xffeaf1f6,true);
+    game.native_fill(batch,[0.,0.,batch.width,batch.height],0x80110e0f);
+    ui_panel(game, batch, panel);
+    let title = tr("Map settings","Настройки карты","Paramètres des cartes","Ajustes del mapa","Karteneinstellungen");
+    game.map_text(batch, title, [((batch.width-game.map_text_width(title))*0.5).floor(),panel[1]+10.],0xfffff3e7,true);
     for (i,name) in setting_tabs().into_iter().enumerate() {
         let rect=settings_tab(panel,i);
         button(game,batch,rect,&fit_text(game,name,rect[2]-6.),mouse,true);
         if state.settings_tab==i {
-            game.native_fill(batch,[rect[0],rect[1]+rect[3]-2.,rect[2],2.],0xff62d0c2);
+            game.native_fill(batch,[rect[0]+2.,rect[1]+rect[3]-3.,rect[2]-4.,1.],UI_ACCENT);
         }
     }
     let total=settings_catalog(game,state.settings_tab).count();
     let count=settings_rows(panel);
     let start=state.settings_scroll.min(total.saturating_sub(count));
+    let mut tooltip = None;
     for (i,setting) in settings_catalog(game,state.settings_tab).skip(start).take(count).enumerate() {
         use horizon_client::mod_list::NativeSettingValue as Value;
         let (row,control)=settings_row(panel,i);
-        game.native_fill(batch,row,0xff293745);
+        button(game, batch, row, "", mouse, true);
         let label=game.translate(&setting.label).unwrap_or_else(||setting.key.replace('_'," "));
-        game.map_text(batch,&fit_text(game,&label,control[0]-row[0]-12.),[row[0]+6.,row[1]+7.],0xffe2edf5,false);
-        let value=setting_value(game,&setting.value);
-        button(game,batch,control,&fit_text(game,&value,control[2]-10.),mouse,true);
+        let left = fit_text(game,&label,control[0]-row[0]-10.);
+        game.map_text(batch,&left,[row[0]+6.,row[1]+6.],0xfff4e9dd,false);
+        let value = if setting.key == "world_cave_y" && game.map_number("world_cave_y") == Some(320.) {
+            tr("Same as minimap", "Как на миникарте", "Comme la mini-carte", "Como en el minimapa", "Wie Minikarte").to_owned()
+        } else {
+            setting_value(game,&setting.value)
+        };
+        let right = fit_text(game, &value, control[2] - if matches!(setting.value, Value::Color(_)) { 24. } else { 8. });
+        let value_color = if matches!(setting.value, Value::Toggle(false)) { 0xffbeafa4 } else { UI_ACCENT };
+        game.map_text(batch, &right, [control[0]+control[2]-game.map_text_width(&right)-6.,row[1]+6.], value_color, false);
         if matches!(setting.value,Value::Range {..}) {
             let filled=(control[2]-8.)*setting.value.fraction();
-            game.native_fill(batch,[control[0]+4.,control[1]+18.,control[2]-8.,2.],0xff14202a);
-            game.native_fill(batch,[control[0]+4.,control[1]+18.,filled,2.],0xff62d0c2);
+            game.native_fill(batch,[control[0]+4.,control[1]+16.,control[2]-8.,2.],0xff726056);
+            game.native_fill(batch,[control[0]+4.,control[1]+16.,filled,2.],UI_ACCENT);
         }
         if let Value::Color(rgb)=setting.value {
             game.native_fill(batch,[control[0]+5.,control[1]+6.,10.,10.],waypoint_argb(rgb));
         }
+        if inside(mouse, row) && (left != label || right != value) {
+            tooltip = Some(format!("{label} · {value}"));
+        }
     }
-    let shown = if total == 0 {0} else {start+1};
-    game.map_text(batch,&format!("{shown}–{} / {total}",(start+count).min(total)),[panel[0]+10.,panel[1]+panel[3]-22.],0xffb9cbd8,false);
+    draw_scroll_indicator(game, batch, [panel[0], panel[1]+54., panel[2], panel[3]-93.], total, count, start);
     if matches!(state.settings_tab, 0 | 3) {
         let rect = settings_action(panel);
         let label = if state.settings_tab == 0 {
@@ -6696,7 +6816,8 @@ fn draw_settings(game: &Game<'_>, batch: &mut HudBatch, state: &State) {
         };
         button(game, batch, rect, &fit_text(game, label, rect[2] - 6.), mouse, true);
     }
-    button(game,batch,settings_back(panel),tr("Back","Назад","Retour","Volver","Zurück"),mouse,true);
+    button(game,batch,settings_back(panel),tr("Done","Готово","Terminé","Listo","Fertig"),mouse,true);
+    if let Some(label) = tooltip { draw_tooltip(game, batch, &label, mouse); }
     draw_notice(game, batch, state);
 }
 
@@ -6706,6 +6827,7 @@ fn open_settings(state:&mut State, back:Option<Mode>, tab:usize) {
     state.radar_editor=None;
     state.settings_tab=tab;
     state.settings_scroll=0;
+    state.settings_slider=None;
     state.map_panel=MapPanel::None;
     state.waypoint_search_focus=false;
     state.server_world_focus=false;
@@ -6720,6 +6842,7 @@ fn close_settings(state:&mut State) {
 }
 
 fn settings_press(game:&Game<'_>, state:&mut State, screen:&mod_api::ScreenView<'_>, button:i32) {
+    state.settings_slider = None;
     if state.placement.is_some() {
         if button == 0 { placement_press(game, state, screen); }
         return;
@@ -6778,6 +6901,9 @@ fn settings_press(game:&Game<'_>, state:&mut State, screen:&mod_api::ScreenView<
         Value::Range {..} => {
             if !inside(mouse,control) {return;}
             next.slide((mouse[0]-control[0]-4.)/(control[2]-8.).max(1.));
+            if button == 0 {
+                state.settings_slider = Some((row.key.clone(), [control[0] + 4., (control[2] - 8.).max(1.)]));
+            }
         }
         Value::Choice { options,index } if button==1 && !options.is_empty() => {
             *index=(*index+options.len()-1)%options.len();
@@ -6794,6 +6920,8 @@ fn settings_press(game:&Game<'_>, state:&mut State, screen:&mod_api::ScreenView<
 }
 
 fn draw_map_tools(game: &Game<'_>, batch: &mut HudBatch, state: &State, mouse: [f32;2]) {
+    let cache_attention = runtime::initialize(game.native_data_dir(runtime::MOD_ID))
+        .maps.needs_upgrade(&state.world) || state.caches.attention;
     let labels = [
         tr("Waypoints","Метки","Repères","Marcadores","Wegpunkte"),
         tr("Center on me","К игроку","Recentrer","Centrar","Zu mir"),
@@ -6801,30 +6929,60 @@ fn draw_map_tools(game: &Game<'_>, batch: &mut HudBatch, state: &State, mouse: [
         tr("Export PNG","Экспорт PNG","Exporter PNG","Exportar PNG","PNG-Export"),
         tr("Last death","Последняя смерть","Dernière mort","Última muerte","Letzter Tod"),
         tr("Server worlds", "Миры сервера", "Mondes du serveur", "Mundos del servidor", "Serverwelten"),
+        if cache_attention {
+            tr("Update map cache", "Обновить кеш карты", "Actualiser le cache", "Actualizar caché", "Kartencache aktualisieren")
+        } else {
+            tr("Map caches", "Кеши карт", "Caches des cartes", "Cachés de mapas", "Karten-Caches")
+        },
     ];
-    for ((i, rect), label) in map_tools(batch.width, state).enumerate().zip(labels) {
+    let icons: [[u8; 7]; 7] = [
+        [0b0011100, 0b0100010, 0b1001001, 0b1001001, 0b0100010, 0b0010100, 0b0001000],
+        [0b0001000, 0b0011100, 0b0100010, 0b1101011, 0b0100010, 0b0011100, 0b0001000],
+        [0b0100010, 0b0100010, 0b1110111, 0b0100010, 0b0100010, 0b1110010, 0b0100010],
+        [0b0001000, 0b0001000, 0b0101010, 0b0011100, 0b0001000, 0b1000001, 0b1111111],
+        [0b0111110, 0b1000001, 0b1010101, 0b1010101, 0b1000001, 0b0111110, 0b0010100],
+        [0b0011100, 0b0101010, 0b1001001, 0b1111111, 0b1001001, 0b0101010, 0b0011100],
+        [0b1111111, 0b1000001, 0b1111111, 0b1000001, 0b1111111, 0b1000001, 0b1111111],
+    ];
+    let mut tooltip = None;
+    for (i, rect) in map_tools(batch.width, batch.height, state) {
         let active = i == 0 && state.map_panel == MapPanel::Waypoints
-            || i == 5 && (state.map_panel == MapPanel::ServerWorlds || state.world.starts_with("subworld:"));
-        if active {
-            game.native_fill(batch, [rect[0], rect[1] - 2., rect[2], 2.], 0xff62d0c2);
+            || i == 5 && (state.map_panel == MapPanel::ServerWorlds || state.world.starts_with("subworld:"))
+            || i == 6 && cache_attention;
+        let enabled = i != 4 || latest_death(state).is_some();
+        let hover = inside(mouse, rect);
+        button(game, batch, rect, "", mouse, enabled);
+        if hover { tooltip = Some(labels[i]); }
+        let color = if !enabled { 0xff8a817b } else if active || hover { UI_ACCENT } else { 0xfff4e9dd };
+        for (y, bits) in icons[i].into_iter().enumerate() {
+            for x in 0..7 {
+                if bits & (1 << (6-x)) != 0 {
+                    game.native_fill(batch, [rect[0] + 4. + x as f32 * 2., rect[1] + 4. + y as f32 * 2., 2., 2.], color);
+                }
+            }
         }
-        button(game,batch,rect,&fit_text(game,label,rect[2]-6.),mouse,i != 4 || latest_death(state).is_some());
     }
     let panel = map_panel_rect(batch.width,batch.height);
     let title = match state.map_panel {
-        MapPanel::None => return,
+        MapPanel::None => {
+            if let Some(label) = tooltip { draw_tooltip(game, batch, label, mouse); }
+            return;
+        }
         MapPanel::Waypoints => labels[0],
         MapPanel::ServerWorlds => labels[5],
     };
-    game.native_fill(batch,panel,0xf5212e39);
-    game.native_fill(batch,[panel[0],panel[1],2.,panel[3]],0xff62d0c2);
+    ui_panel(game, batch, panel);
     game.map_text(batch,title,[panel[0]+7.,panel[1]+7.],0xffe6f0f4,true);
     if state.map_panel == MapPanel::ServerWorlds {
         draw_server_worlds(game, batch, state, panel, mouse);
+        if let Some(label) = tooltip { draw_tooltip(game, batch, label, mouse); }
         return;
     }
     let [search, group, all, hidden] = map_panel_fields(panel);
-    game.native_fill(batch, search, if state.waypoint_search_focus {0xff355464} else {0xff253744});
+    ui_panel(game, batch, search);
+    if state.waypoint_search_focus {
+        game.native_fill(batch, [search[0]+1., search[1]+1., search[2]-2., 1.], UI_ACCENT);
+    }
     let value = if state.waypoint_search.is_empty() {
         tr("Search waypoints…","Поиск метки…","Rechercher un repère…","Buscar marcador…","Wegpunkt suchen…")
     } else { &state.waypoint_search };
@@ -6832,19 +6990,19 @@ fn draw_map_tools(game: &Game<'_>, batch: &mut HudBatch, state: &State, mouse: [
     let group_name = format!("{} ›", group_label(state.waypoint_group.as_deref()));
     for (rect, label, active) in [
         (group, group_name.as_str(), false),
-        (all, tr("All groups","Все группы","Tous les groupes","Todos los grupos","Alle Gruppen"),
+        (all, tr("Show all groups","Показать группы","Afficher les groupes","Ver grupos","Alle Gruppen zeigen"),
             game.map_option("all_waypoint_groups") == Some(1)),
         (hidden, tr("Show disabled","Показать скрытые","Voir les repères inactifs","Ver desactivados","Inaktive anzeigen"),
-            state.map_panel_hidden),
+            show_hidden_on_map(game, true)),
     ] {
         button(game,batch,rect,&fit_text(game,label,rect[2]-6.),mouse,true);
-        if active { game.native_fill(batch,[rect[0],rect[1]+rect[3]-2.,rect[2],2.],0xff62d0c2); }
+        if active { game.native_fill(batch,[rect[0]+2.,rect[1]+rect[3]-3.,rect[2]-4.,1.],UI_ACCENT); }
     }
     let count = map_panel_rows(batch.height);
-    let visible = visible_map_panel_waypoints(game, state, batch.height);
+    let (visible, total) = visible_map_panel_waypoints(game, state, batch.height);
     for (i, waypoint) in visible.iter().enumerate() {
         let row=map_panel_row(panel,i);
-        game.native_fill(batch,row,if inside(mouse,row) {0xff395469} else {0xff293c4e});
+        game.native_fill(batch,row,if inside(mouse,row) {UI_HOVER} else {0xff322e2e});
         game.native_fill(batch,[row[0]+4.,row[1]+5.,8.,8.],waypoint_argb(waypoint.color));
         let name=fit_text(game,&waypoint.name,row[2]-20.);
         game.map_text(batch,&name,[row[0]+17.,row[1]+5.],
@@ -6867,6 +7025,9 @@ fn draw_map_tools(game: &Game<'_>, batch: &mut HudBatch, state: &State, mouse: [
     }
     let row = map_panel_row(panel,count);
     button(game,batch,row,tr("Manage waypoints…","Управление метками…","Gérer les repères…","Gestionar marcadores…","Wegpunkte verwalten…"),mouse,true);
+    draw_scroll_indicator(game, batch, [panel[0], panel[1]+76., panel[2], count as f32 * 20.],
+        total, count, state.map_panel_scroll);
+    if let Some(label) = tooltip { draw_tooltip(game, batch, label, mouse); }
 }
 
 fn server_world_rows(names: &BTreeSet<String>, skip: usize, take: usize) -> impl Iterator<Item = Option<&str>> {
@@ -6878,7 +7039,10 @@ fn draw_server_worlds(game: &Game<'_>, batch: &mut HudBatch, state: &State, pane
     let [name_field, create, _, _] = map_panel_fields(panel);
     let prompt = tr("New world name…", "Имя нового мира…", "Nom du nouveau monde…", "Nombre del nuevo mundo…", "Neuer Weltname…");
     let name = if state.server_world_name.is_empty() { prompt } else { &state.server_world_name };
-    game.native_fill(batch, name_field, if state.server_world_focus { 0xff355464 } else { 0xff253744 });
+    ui_panel(game, batch, name_field);
+    if state.server_world_focus {
+        game.native_fill(batch, [name_field[0]+1., name_field[1]+1., name_field[2]-2., 1.], UI_ACCENT);
+    }
     game.map_text(batch, &fit_text(game, name, name_field[2] - 10.), [name_field[0] + 5., name_field[1] + 5.], 0xffeaf1f6, false);
     button(game, batch, create, tr("Create", "Создать", "Créer", "Crear", "Anlegen"), mouse, !state.server_world_name.trim().is_empty());
     let default_label = tr("Default", "По умолчанию", "Par défaut", "Predeterminado", "Standard");
@@ -6887,8 +7051,11 @@ fn draw_server_worlds(game: &Game<'_>, batch: &mut HudBatch, state: &State, pane
         let active = name == active.as_deref();
         let text = fit_text(game, name.unwrap_or(default_label), row[2] - 14.);
         button(game, batch, row, &text, mouse, true);
-        if active { game.native_fill(batch, [row[0], row[1], 3., row[3]], 0xff62d0c2); }
+        if active { game.native_fill(batch, [row[0]+2., row[1]+2., 2., row[3]-4.], UI_ACCENT); }
     }
+    let count = map_panel_rows(batch.height);
+    draw_scroll_indicator(game, batch, [panel[0], panel[1]+76., panel[2], count as f32 * 20.],
+        names.len() + 1, count, state.map_panel_scroll);
 }
 
 fn select_map_server_world(game: &Game<'_>, state: &mut State, name: Option<&str>) {
@@ -6914,7 +7081,7 @@ fn create_map_server_world(game: &Game<'_>, state: &mut State) {
 fn map_tools_press(game: &Game<'_>, state: &mut State, screen: &mod_api::ScreenView<'_>, button: i32) -> bool {
     let [w,h] = [screen.rect[2],screen.rect[3]];
     let mouse = screen.mouse;
-    if let Some(i) = map_tools(w, state).position(|rect| inside(mouse,rect)) {
+    if let Some((i, _)) = map_tools(w, h, state).find(|(_, rect)| inside(mouse,*rect)) {
         state.dragging = false;
         if button != 0 { return true; }
         state.server_world_focus = false;
@@ -6947,6 +7114,7 @@ fn map_tools_press(game: &Game<'_>, state: &mut State, screen: &mod_api::ScreenV
                 state.waypoint_search_focus = false;
                 state.map_panel_scroll = 0;
             }
+            6 => show_cache_manager(game, state),
             _ => {}
         }
         return true;
@@ -6979,6 +7147,19 @@ fn map_tools_press(game: &Game<'_>, state: &mut State, screen: &mod_api::ScreenV
     runtime::set_text_input(state.waypoint_search_focus);
     if !inside(mouse,panel) { return false; }
     state.dragging = false;
+    if button == 1 {
+        if let Some(point) = visible_map_panel_waypoints(game, state, h).0.into_iter().enumerate()
+            .find_map(|(i, point)| inside(mouse, map_panel_row(panel, i)).then_some(point))
+        {
+            state.menu = Some(Menu {
+                at: mouse, block: [point.x, point.z], dimension: point.dimension,
+                height: (!point.options.unspecified_height).then_some(point.y), height_approximate: false,
+                waypoint: Some(Spot { dimension: point.dimension, x: point.x, z: point.z, key: point.key() }),
+                fluid: None, portal: None, radar_player: None,
+            });
+        }
+        return true;
+    }
     if button != 0 || state.waypoint_search_focus { return true; }
     if inside(mouse, group) {
         next_waypoint_group(game, state);
@@ -6987,15 +7168,17 @@ fn map_tools_press(game: &Game<'_>, state: &mut State, screen: &mod_api::ScreenV
         state.map_settings_change = Some(("all_waypoint_groups".to_owned(), enabled.to_string()));
         state.map_panel_scroll = 0;
     } else if inside(mouse, hidden) {
-        state.map_panel_hidden = !state.map_panel_hidden;
+        let enabled = !show_hidden_on_map(game, true);
+        state.map_settings_change = Some(("world_show_disabled_waypoints".to_owned(), enabled.to_string()));
         state.map_panel_scroll = 0;
     } else if inside(mouse, map_panel_row(panel, map_panel_rows(h))) {
         state.map_panel = MapPanel::None;
         state.mode = Mode::Waypoints;
+        state.waypoints_back_to_map = true;
         state.waypoint_scroll = 0;
         state.waypoint_bulk = None;
     } else {
-        let key = visible_map_panel_waypoints(game, state, h).iter().enumerate()
+        let key = visible_map_panel_waypoints(game, state, h).0.iter().enumerate()
             .find_map(|(i, point)| inside(mouse, map_panel_row(panel, i)).then(|| point.key()));
         if let Some(key) = key && let Some(dimension) = focus_waypoint(state, key) {
             runtime::initialize(game.native_data_dir(runtime::MOD_ID)).choose_dimension(true, dimension);
@@ -7004,16 +7187,17 @@ fn map_tools_press(game: &Game<'_>, state: &mut State, screen: &mod_api::ScreenV
     true
 }
 
-fn map_footer(width: f32, height: f32) -> [f32; 4] {
-    [
-        8.0,
-        (height - 47.0).max(0.0),
-        (width - 16.0).max(1.0),
-        39.0_f32.min(height),
-    ]
+fn map_footer(width: f32, height: f32, panel_open: bool) -> [f32; 4] {
+    if width < 544. && panel_open {
+        let panel = map_panel_rect(width, height);
+        return [8., height - 70., (panel[0] - 12.).max(1.), 34.];
+    }
+    let w = (width - if width < 544. { 16. } else { 280. }).clamp(1., 500.);
+    let offset = if width < 544. { 70. } else { 42. };
+    [((width - w) * 0.5).floor(), (height - offset).max(0.), w, 34.]
 }
 fn world_zoom_buttons(width:f32) -> [[f32;4];2] {
-    [[width-152.,36.,19.,18.],[width-130.,36.,19.,18.]]
+    [[width - 30., 34., 22., 22.], [width - 30., 8., 22., 22.]]
 }
 
 fn map_zoom(game:&Game<'_>,state:&mut State,step:f64,offset:[f64;2]) {
@@ -7024,15 +7208,14 @@ fn map_zoom(game:&Game<'_>,state:&mut State,step:f64,offset:[f64;2]) {
 }
 
 fn over_map_controls(game:&Game<'_>,state:&State,mouse: [f32; 2], width: f32, height: f32) -> bool {
-    inside(mouse, cache_map_button(width))
-        || map_tools(width, state).any(|rect| inside(mouse, rect))
+    map_tools(width, height, state).any(|(_, rect)| inside(mouse, rect))
         || state.map_panel != MapPanel::None && inside(mouse, map_panel_rect(width, height))
-        || inside(mouse, map_footer(width, height))
+        || inside(mouse, map_footer(width, height, state.map_panel != MapPanel::None))
         || (0..4).any(|i| inside(mouse, tab(width, i)))
         || game.map_option("world_zoom_buttons")==Some(1) && world_zoom_buttons(width).into_iter().any(|rect| inside(mouse,rect))
 }
 fn draw_map_screen(game: &Game<'_>, batch: &mut HudBatch, state: &State) {
-    let mouse = game.cursor();
+    let mouse = if state.mode == Mode::Map { game.cursor() } else { [-1., -1.] };
     let rect = rectangle(batch.width, batch.height);
     let first_vertex=batch.vertices.len();
     draw(game,batch,state,rect,true,Some(mouse));
@@ -7160,12 +7343,11 @@ fn draw_map_screen(game: &Game<'_>, batch: &mut HudBatch, state: &State) {
         }
     }
     let settings = runtime::initialize(game.native_data_dir(runtime::MOD_ID)).settings();
-    game.native_fill(batch, [6.,6.,tab(batch.width,3)[0]+tab(batch.width,3)[2]-4.,28.], 0xec101922);
     for (i, dimension) in Dimension::ALL.into_iter().enumerate() {
         let tab = tab(batch.width, i);
         button(game, batch, tab, "", mouse, true);
         if dimension == settings.world_dimension {
-            game.native_fill(batch, tab, 0xe032624b);
+            game.native_fill(batch, [tab[0]+2.,tab[1]+tab[3]-3.,tab[2]-4.,1.], UI_ACCENT);
         }
         dimension_icon(game, batch, dimension, [tab[0] + 4.0, tab[1] + 4.0]);
         game.map_text(
@@ -7176,11 +7358,11 @@ fn draw_map_screen(game: &Game<'_>, batch: &mut HudBatch, state: &State) {
             true,
         );
     }
-    let footer = map_footer(batch.width, batch.height);
-    game.native_fill(batch, footer, 0xdf10151d);
+    let footer = map_footer(batch.width, batch.height, state.map_panel != MapPanel::None);
+    ui_panel(game, batch, footer);
     if game.map_option("map_show_coordinates")!=Some(0) {
         let coordinates=fit_text(game,&format!("{coordinates}   {nether}"),footer[2]-12.);
-        game.map_text(batch,&coordinates,[footer[0]+6.,footer[1]+5.],0xffffff,true);
+        game.map_text(batch,&coordinates,[footer[0]+((footer[2]-game.map_text_width(&coordinates))/2.).floor(),footer[1]+5.],0xffffff,true);
     }
     let show_biome=game.map_option("world_hover_biome")!=Some(0);
     if show_biome {biome_icon(game,batch,biome.as_deref(),[footer[0]+6.,footer[1]+18.]);}
@@ -7189,8 +7371,8 @@ fn draw_map_screen(game: &Game<'_>, batch: &mut HudBatch, state: &State) {
         localized_biome,
     )} else {String::new()};
     if game.map_option("world_zoom_readout")==Some(1) {
-        if !label.is_empty(){label.push_str(" · ");}
-        label.push_str(&format!("{:.2}×",1./state.camera.zoom));
+        let zoom = format!("{:.2}×", 1. / state.camera.zoom);
+        game.map_text(batch, &zoom, [footer[0] + footer[2] - game.map_text_width(&zoom) - 6., footer[1] + 21.], UI_ACCENT, true);
     }
     if game.map_option("world_cave_ceiling")==Some(1)
         && let Some(Layer::Below(y))=state.frame.as_ref().map(|frame|frame.view.layer) {
@@ -7212,7 +7394,7 @@ fn draw_map_screen(game: &Game<'_>, batch: &mut HudBatch, state: &State) {
     }
     game.map_text(
         batch,
-        &label,
+        &fit_text(game, &label, footer[2] - if game.map_option("world_zoom_readout")==Some(1) { 82. } else { 32. }),
         [footer[0] + 26.0, footer[1] + 21.0],
         if lod_warning { 0xffffd45c } else { 0xffffff },
         true,
@@ -7227,47 +7409,16 @@ fn draw_map_screen(game: &Game<'_>, batch: &mut HudBatch, state: &State) {
             button(game,batch,rect,label,mouse,true);
         }
     }
-    if state.info.is_none() && state.menu.is_none() {
+    if state.info.is_none() {
         draw_map_tools(game,batch,state,mouse);
     }
     draw_menu(game, batch, state);
     draw_notice(game, batch, state);
-    if state.info.is_none() && state.menu.is_none() {
-        let controller = runtime::initialize(game.native_data_dir(runtime::MOD_ID));
-        let attention = controller.maps.needs_upgrade(&state.world) || state.caches.attention;
-        button(
-            game,
-            batch,
-            cache_map_button(batch.width),
-            if attention {
-                tr(
-                    "Update cache…",
-                    "Обновить кеш…",
-                    "Actualiser cache…",
-                    "Actualizar caché…",
-                    "Cache aktualisieren…",
-                )
-            } else {
-                tr(
-                    "Map caches…",
-                    "Кеши карт…",
-                    "Caches…",
-                    "Cachés…",
-                    "Karten-Caches…",
-                )
-            },
-            mouse,
-            true,
-        );
-    }
     if let Some(info) = state.info {
         draw_information(game, batch, state, info);
     }
 }
 
-fn cache_map_button(width: f32) -> [f32; 4] {
-    [(width - 106.).max(6.), 36., 100., 18.]
-}
 fn cache_rows(height: f32) -> usize {
     (((height - 122.).max(0.) / 48.) as usize).clamp(1, 16)
 }
@@ -7508,7 +7659,7 @@ fn draw_cache_screen(game: &Game<'_>, batch: &mut HudBatch, state: &State) {
     let snapshot = runtime::initialize(game.native_data_dir(runtime::MOD_ID))
         .caches
         .snapshot();
-    game.native_fill(batch, [0., 0., batch.width, batch.height], 0xf0181b20);
+    game.native_fill(batch, [0., 0., batch.width, batch.height], 0xf01d1a1a);
     game.map_text(
         batch,
         tr(
@@ -7554,9 +7705,9 @@ fn draw_cache_screen(game: &Game<'_>, batch: &mut HudBatch, state: &State) {
             batch,
             row,
             if state.caches.selected.as_ref() == Some(&entry.file) {
-                0xff334658
+                UI_SELECTED
             } else {
-                0xff232c35
+                0xff302c2c
             },
         );
         let server = entry.world.as_deref().is_some_and(|world| world.starts_with("server:") || world.starts_with("subworld:"));
@@ -7925,13 +8076,6 @@ fn map_press(
     button: i32,
     canceled: &mut bool,
 ) {
-    if inside(screen.mouse, cache_map_button(screen.rect[2])) {
-        if button == 0 {
-            show_cache_manager(game, state);
-        }
-        *canceled = true;
-        return;
-    }
     if state.menu.is_none() && button==0 && game.map_option("world_zoom_buttons")==Some(1) {
         for (rect,step) in world_zoom_buttons(screen.rect[2]).into_iter().zip([-1.,1.]) {
             if inside(screen.mouse,rect) {
@@ -8165,6 +8309,14 @@ fn toggle_waypoint_bulk(state: &mut State) {
     };
 }
 
+fn close_waypoints(state: &mut State) {
+    if state.waypoints_back_to_map {
+        state.mode = Mode::Map;
+    } else {
+        state.close = true;
+    }
+}
+
 fn select_waypoint_results(game: &Game<'_>, state: &mut State) {
     state.waypoint_bulk = Some(listed_waypoints(game, state).into_iter().map(|(_, point)| point.key()).collect());
     state.waypoint_confirm_delete = false;
@@ -8177,12 +8329,21 @@ fn waypoint_press(
     button: i32,
     canceled: &mut bool,
 ) {
+    if button == 1 {
+        state.waypoint_selected = None;
+        state.waypoint_bulk = None;
+        state.waypoint_confirm_delete = false;
+        state.waypoint_groups_open = false;
+        state.waypoint_group_move = false;
+        *canceled = true;
+        return;
+    }
     if button != 0 {
         return;
     }
     let w=screen.rect[2];
     let h=screen.rect[3];
-    let [options,create,back]=waypoint_header(w);
+    let [options,create,back] = waypoint_footer(w, h);
     let controller=runtime::initialize(game.native_data_dir(runtime::MOD_ID));
     let [group_rect, create_group, rename_group, remove_group]=waypoint_group_buttons(w);
     if state.waypoint_groups_open {
@@ -8260,7 +8421,7 @@ fn waypoint_press(
         return;
     }
     if inside(screen.mouse,back) {
-        if missing_item(game,state,true).is_none() {state.mode=Mode::Map;}
+        close_waypoints(state);
         *canceled=true;
         return;
     }
@@ -8449,18 +8610,7 @@ fn name_press(
             return;
         }
     }
-    let save = [
-        rect[0] + rect[2] - 184.0,
-        rect[1] + rect[3] - 24.0,
-        80.0,
-        18.0,
-    ];
-    let cancel = [
-        rect[0] + rect[2] - 96.0,
-        rect[1] + rect[3] - 24.0,
-        80.0,
-        18.0,
-    ];
+    let [save, cancel] = name_buttons(rect);
     if inside(screen.mouse, save) {
         save_name(game, state);
         *canceled = true;
@@ -8579,6 +8729,19 @@ pub(super) fn drag(game: &Game<'_>, delta: [f32; 2], button: i32, canceled: &mut
         *canceled = true;
         return;
     }
+    if state.mode == Mode::Settings {
+        if let Some((key, [x, width])) = &state.settings_slider
+            && let Some(row) = settings_catalog(game, state.settings_tab).find(|row| &row.key == key)
+        {
+            let mut next = row.value.clone();
+            next.slide((game.cursor()[0] - x) / width);
+            if let horizon_client::mod_list::NativeSettingValue::Range { value, .. } = next {
+                state.map_settings_change = Some((key.clone(), value.to_string()));
+            }
+        }
+        *canceled = true;
+        return;
+    }
     if state.mode != Mode::Map || !state.dragging {
         return;
     }
@@ -8598,6 +8761,7 @@ pub(super) fn scroll(
     }
     let mut state = state();
     if state.mode == Mode::Settings {
+        state.settings_slider = None;
         if let Some(editor) = &mut state.radar_editor {
             editor.scroll([screen.rect[2], screen.rect[3]], scroll[1]);
             *canceled = true;
@@ -8726,7 +8890,19 @@ pub(super) fn screen_key(game: &Game<'_>, key: &str, modifiers: u32, canceled: &
                 "key.keyboard.escape" => state.placement = None,
                 _ => {}
             }
-        } else if key == "key.keyboard.escape" { close_settings(&mut state); }
+        } else if key == "key.keyboard.escape" {
+            close_settings(&mut state);
+        } else if matches!(key, "key.keyboard.page.up" | "key.keyboard.page.down" | "key.keyboard.home" | "key.keyboard.end") {
+            let (w, h) = game.gui_size();
+            let count = settings_rows(settings_panel(w, h));
+            let max = settings_catalog(game, state.settings_tab).count().saturating_sub(count);
+            state.settings_scroll = match key {
+                "key.keyboard.page.up" => state.settings_scroll.saturating_sub(count),
+                "key.keyboard.page.down" => (state.settings_scroll + count).min(max),
+                "key.keyboard.home" => 0,
+                _ => max,
+            };
+        }
         *canceled=true;
         return;
     }
@@ -8765,6 +8941,19 @@ pub(super) fn screen_key(game: &Game<'_>, key: &str, modifiers: u32, canceled: &
     }
     if state.mode == Mode::Waypoints && key == "key.keyboard.a" && modifiers & 10 != 0 {
         select_waypoint_results(game, &mut state);
+        *canceled = true;
+        return;
+    }
+    if key == "key.keyboard.f" && modifiers & 10 != 0
+        && (state.mode == Mode::Waypoints || state.mode == Mode::Map && state.map_panel != MapPanel::ServerWorlds)
+    {
+        if state.mode == Mode::Map {
+            state.map_panel = MapPanel::Waypoints;
+            state.menu = None;
+            state.dragging = false;
+        }
+        state.waypoint_search_focus = true;
+        runtime::set_text_input(true);
         *canceled = true;
         return;
     }
@@ -8819,6 +9008,10 @@ pub(super) fn screen_key(game: &Game<'_>, key: &str, modifiers: u32, canceled: &
         return;
     }
     if key == "key.keyboard.escape" {
+        if state.mode == Mode::Map && state.menu.take().is_some() {
+            *canceled = true;
+            return;
+        }
         if state.map_panel != MapPanel::None && state.mode == Mode::Map {
             state.map_panel = MapPanel::None;
             state.waypoint_search_focus = false;
@@ -8828,7 +9021,8 @@ pub(super) fn screen_key(game: &Game<'_>, key: &str, modifiers: u32, canceled: &
             return;
         }
         runtime::set_text_input(false);
-        state.close = true;
+        if state.mode == Mode::Waypoints { close_waypoints(&mut state); }
+        else { state.close = true; }
         *canceled = true;
     }
 }

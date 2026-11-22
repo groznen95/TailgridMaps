@@ -22,6 +22,10 @@ pub struct Snapshot {
     air: BlockStateId,
 }
 impl Snapshot {
+    pub fn saved(chunk: Chunk, height: Range<i32>, air: BlockStateId) -> Self {
+        Self { origin: [chunk.x, chunk.z], width: 1, chunks: vec![Some(Arc::new(chunk))], height, air }
+    }
+
     fn chunk(&self, x: i32, z: i32) -> Option<&Chunk> {
         let dx = i64::from(x >> 4) - i64::from(self.origin[0]);
         let dz = i64::from(z >> 4) - i64::from(self.origin[1]);

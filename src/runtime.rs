@@ -2019,6 +2019,8 @@ pub enum ScreenRequest {
     Create,
     Settings,
     SettingsOverlay,
+    MapOverlay,
+    WaypointsOverlay,
 }
 
 static SCREEN_REQUEST: AtomicU8 = AtomicU8::new(0);
@@ -2036,6 +2038,8 @@ pub fn request_screen(request: ScreenRequest) {
             ScreenRequest::Create => 4,
             ScreenRequest::Settings => 5,
             ScreenRequest::SettingsOverlay => 6,
+            ScreenRequest::MapOverlay => 7,
+            ScreenRequest::WaypointsOverlay => 8,
         },
         Ordering::Release,
     );
@@ -2049,6 +2053,8 @@ pub fn take_screen_request() -> Option<ScreenRequest> {
         4 => Some(ScreenRequest::Create),
         5 => Some(ScreenRequest::Settings),
         6 => Some(ScreenRequest::SettingsOverlay),
+        7 => Some(ScreenRequest::MapOverlay),
+        8 => Some(ScreenRequest::WaypointsOverlay),
         _ => None,
     }
 }
@@ -6095,6 +6101,33 @@ pub mod maps {
     }
 
     pub type WriteMapPng = fn(&Path, u32, u32, &[u8]) -> io::Result<()>;
+    pub type SavedTiles = Box<dyn Iterator<Item = io::Result<Option<(Dimension, [i32; 2], Tile)>>> + Send>;
+
+    struct SaveScan {
+        session: u64,
+        tiles: SavedTiles,
+        reply: mpsc::SyncSender<Result<usize, String>>,
+        imported: usize,
+        skipped: usize,
+        first_error: Option<String>,
+    }
+
+    pub struct PngExport {
+        pub dimension: Dimension,
+        pub layer: Layer,
+        pub regions: bool,
+        pub night: bool,
+        pub max_edge: u16,
+        pub claims: BTreeMap<(i32, i32), (u32, u32)>,
+    }
+
+    fn blend_export_color(pixel: &mut [u8], argb: u32) {
+        let alpha = argb >> 24;
+        for (value, shift) in pixel.iter_mut().zip([16, 8, 0]) {
+            let color = (argb >> shift) & 0xff;
+            *value = ((u32::from(*value) * (255 - alpha) + color * alpha) / 255) as u8;
+        }
+    }
 
     fn lod_record(d: Dimension, key: LodKey) -> RecordKey {
         [
@@ -6671,28 +6704,8 @@ pub mod maps {
                         continue;
                     }
                 };
-                for (chunk, mut tile) in region.tiles {
-                    let key = (dimension, region.layer, chunk[0], chunk[1]);
-                    if let Some(existing) = self.tile_at(key) {
-                        let mut merged = (*existing).clone();
-                        merged.biomes.resize(256, None);
-                        let mut changed = false;
-                        for (index, (old, new)) in merged.pixels.chunks_exact_mut(4).zip(tile.pixels.chunks_exact(4)).enumerate() {
-                            if old[3] == 0 && new[3] != 0 {
-                                old.copy_from_slice(new);
-                                merged.heights[index] = tile.heights[index];
-                                merged.walls[index] = tile.walls[index];
-                                merged.biomes[index] = tile.biomes.get(index).cloned().flatten();
-                                changed = true;
-                            }
-                        }
-                        if !changed { continue; }
-                        tile = merged;
-                    }
-                    self.insert(dimension, region.layer, chunk, tile);
-                    let tile = self.tiles[&key].1.clone();
-                    self.save(record_key(dimension, region.layer, chunk[0], chunk[1]), tile)?;
-                    imported += 1;
+                for (chunk, tile) in region.tiles {
+                    imported += usize::from(self.merge_import_tile(dimension, region.layer, chunk, tile)?);
                 }
                 self.flush()?;
                 self.trim()?;
@@ -6708,7 +6721,34 @@ pub mod maps {
             }
         }
 
-        fn export_png(&self, dimension: Dimension, layer: Layer, directory: &Path, write: WriteMapPng) -> io::Result<String> {
+        fn merge_import_tile(&mut self, dimension: Dimension, layer: Layer, [x, z]: [i32; 2], mut tile: Tile) -> io::Result<bool> {
+            if !tile.pixels.chunks_exact(4).any(|pixel| pixel[3] != 0) {
+                return Ok(false);
+            }
+            let key = (dimension, layer, x, z);
+            if let Some(existing) = self.tile_at(key) {
+                let mut merged = (*existing).clone();
+                merged.biomes.resize(256, None);
+                let mut changed = false;
+                for (i, (old, new)) in merged.pixels.chunks_exact_mut(4).zip(tile.pixels.chunks_exact(4)).enumerate() {
+                    if old[3] == 0 && new[3] != 0 {
+                        old.copy_from_slice(new);
+                        merged.heights[i] = tile.heights[i];
+                        merged.walls[i] = tile.walls[i];
+                        merged.biomes[i] = tile.biomes.get(i).cloned().flatten();
+                        changed = true;
+                    }
+                }
+                if !changed { return Ok(false); }
+                tile = merged;
+            }
+            self.insert(dimension, layer, [x, z], tile);
+            self.save(record_key(dimension, layer, x, z), self.tiles[&key].1.clone())?;
+            Ok(true)
+        }
+
+        fn export_png(&self, export: &PngExport, directory: &Path, write: WriteMapPng) -> io::Result<String> {
+            let PngExport { dimension, layer, .. } = *export;
             let prefix = record_key(dimension, layer, 0, 0);
             let mut chunks: BTreeSet<_> = self.tiles.keys()
                 .filter_map(|&(d, l, x, z)| (d == dimension && l == layer).then_some((x, z)))
@@ -6720,6 +6760,32 @@ pub mod maps {
             }
             let &(x, z) = chunks.first()
                 .ok_or_else(|| io::Error::other("No explored terrain in this layer"))?;
+            let timestamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)
+                .map_err(io::Error::other)?.as_millis();
+            let directory = directory.join("exports");
+            std::fs::create_dir_all(&directory)?;
+            let name = format!("map-{}-{timestamp}", dimension.name());
+            if export.regions {
+                let mut regions = BTreeMap::<_, Vec<_>>::new();
+                for (x, z) in chunks {
+                    regions.entry((x.div_euclid(32), z.div_euclid(32))).or_default().push((x, z));
+                }
+                let partial = directory.join(format!(".{name}.partial"));
+                std::fs::create_dir(&partial)?;
+                let result = (|| {
+                    for ((x, z), chunks) in regions {
+                        let origin = [i64::from(x) * 32, i64::from(z) * 32];
+                        let image = self.png_pixels(export, chunks, origin, [512, 512], 1);
+                        write(&partial.join(format!("{x}_{z}.png")), 512, 512, &image)?;
+                    }
+                    std::fs::rename(&partial, directory.join(&name))
+                })();
+                if result.is_err() {
+                    let _ = std::fs::remove_dir_all(partial);
+                }
+                result?;
+                return Ok(name);
+            }
             let mut min = [i64::from(x), i64::from(z)];
             let mut max = min;
             for &(x, z) in &chunks {
@@ -6730,28 +6796,47 @@ pub mod maps {
             }
             let wide = (max[0] - min[0] + 1) * 16;
             let deep = (max[1] - min[1] + 1) * 16;
-            let scale = ((wide.max(deep) + 4095) / 4096).max(1);
+            let edge = i64::from(export.max_edge.clamp(512, 4096));
+            let scale = ((wide.max(deep) + edge - 1) / edge).max(1);
             let width = ((wide + scale - 1) / scale) as usize;
             let height = ((deep + scale - 1) / scale) as usize;
+            let image = self.png_pixels(export, chunks, min, [width, height], scale);
+            let name = format!("{name}.png");
+            write(&directory.join(&name), width as u32, height as u32, &image)?;
+            Ok(name)
+        }
+
+        fn png_pixels(
+            &self, export: &PngExport, chunks: impl IntoIterator<Item = (i32, i32)>,
+            min: [i64; 2], [width, height]: [usize; 2], scale: i64,
+        ) -> Vec<u8> {
             let mut image = vec![0; width * height * 4];
             for (x, z) in chunks {
-                let tile = self.shaded_chunk(dimension, layer, [x, z]);
+                let tile = self.shaded_chunk(export.dimension, export.layer, [x, z]);
                 let left = (i64::from(x) - min[0]) * 16;
                 let top = (i64::from(z) - min[1]) * 16;
+                let claim = export.claims.get(&(x, z));
                 for (i, rgba) in tile.chunks_exact(4).enumerate().filter(|(_, p)| p[3] != 0) {
                     let px = ((left + (i % 16) as i64) / scale) as usize;
                     let pz = ((top + (i / 16) as i64) / scale) as usize;
                     let at = (px + pz * width) * 4;
-                    image[at..at + 4].copy_from_slice(rgba);
+                    let pixel = &mut image[at..at + 4];
+                    pixel.copy_from_slice(rgba);
+                    // shortcut: saved tiles have prelit colors, so use a night tint until light is stored separately.
+                    if export.night {
+                        for (channel, factor) in pixel.iter_mut().zip([102, 127, 166]) {
+                            *channel = (u16::from(*channel) * factor / 255) as u8;
+                        }
+                    }
+                    if let Some(&(fill, border)) = claim {
+                        blend_export_color(pixel, fill);
+                        if matches!(i % 16, 0 | 15) || matches!(i / 16, 0 | 15) {
+                            blend_export_color(pixel, border);
+                        }
+                    }
                 }
             }
-            let timestamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)
-                .map_err(io::Error::other)?.as_millis();
-            let directory = directory.join("exports");
-            std::fs::create_dir_all(&directory)?;
-            let name = format!("map-{}-{timestamp}.png", dimension.name());
-            write(&directory.join(&name), width as u32, height as u32, &image)?;
-            Ok(name)
+            image
         }
 
         fn schedule_visual_rebuild(&mut self) -> io::Result<()> {
@@ -8581,6 +8666,7 @@ pub mod maps {
         }
     }
     enum Job {
+        ImportSave(SaveScan),
         ImportXaero {
             session: u64,
             dimension: Dimension,
@@ -8590,8 +8676,7 @@ pub mod maps {
         },
         Export {
             session: u64,
-            dimension: Dimension,
-            layer: Layer,
+            export: PngExport,
             write: WriteMapPng,
             reply: mpsc::SyncSender<Result<String, String>>,
         },
@@ -8761,8 +8846,9 @@ pub mod maps {
                     let mut paused = false;
                     let mut blocked_format=None;
                     let mut last_probe=None;
+                    let mut scan = None::<SaveScan>;
                     loop {
-                        let busy=cache.visual_work()&&input.lock().unwrap_or_else(|e|e.into_inner()).is_some();
+                        let busy=scan.is_some() || cache.visual_work()&&input.lock().unwrap_or_else(|e|e.into_inner()).is_some();
                         let first = match rx.recv_timeout(Duration::from_millis(if busy {1} else {100})) {
                             Ok(job) => Some(job),
                             Err(mpsc::RecvTimeoutError::Timeout) => None,
@@ -8862,6 +8948,14 @@ pub mod maps {
                         jobs.extend(rx.try_iter().take(7));
                         for job in jobs {
                             let job = match job {
+                                Job::ImportSave(incoming) => {
+                                    if scan.is_some() || paused || cache.backing.is_none() || incoming.session != current {
+                                        let _ = incoming.reply.try_send(Err("Open the saved world's map before scanning it".into()));
+                                    } else {
+                                        scan = Some(incoming);
+                                    }
+                                    continue;
+                                }
                                 Job::ImportXaero { session, dimension, directory, read, reply } => {
                                     let valid = || session == current && session == active.load(Ordering::Acquire) && !paused;
                                     let result = if valid() {
@@ -8875,11 +8969,11 @@ pub mod maps {
                                     let _ = reply.try_send(result);
                                     continue;
                                 }
-                                Job::Export { session, dimension, layer, write, reply } => {
+                                Job::Export { session, export, write, reply } => {
                                     let result = match &directory {
                                         Some(directory) if session == current
                                             && session == active.load(Ordering::Acquire) && !paused =>
-                                            cache.export_png(dimension, layer, directory, write).map_err(|e| e.to_string()),
+                                            cache.export_png(&export, directory, write).map_err(|e| e.to_string()),
                                         _ => Err("The active map is no longer available".into()),
                                     };
                                     let _ = reply.try_send(result);
@@ -8968,6 +9062,51 @@ pub mod maps {
                                 paused = true;
                                 *errors.lock().unwrap_or_else(|e| e.into_inner()) =
                                     Some(format!("Cache write failed; sampling paused: {e}"));
+                            }
+                        }
+                        if let Some(mut work) = scan.take() {
+                            let end = Instant::now() + Duration::from_millis(8);
+                            let mut finished = None;
+                            for _ in 0..8 {
+                                if paused || current != work.session || active.load(Ordering::Acquire) != work.session {
+                                    finished = Some(Err("World scan stopped because the active map changed".into()));
+                                    break;
+                                }
+                                match work.tiles.next() {
+                                    Some(Ok(Some((dimension, chunk, tile)))) => {
+                                        let result = cache.merge_import_tile(dimension, Layer::Surface, chunk, tile)
+                                            .and_then(|added| { cache.trim()?; Ok(added) });
+                                        match result {
+                                            Ok(added) => { changed |= added; work.imported += usize::from(added); }
+                                            Err(error) => {
+                                                paused = true;
+                                                finished = Some(Err(error.to_string()));
+                                                break;
+                                            }
+                                        }
+                                    }
+                                    Some(Ok(None)) => {}
+                                    Some(Err(error)) => {
+                                        work.skipped += 1;
+                                        work.first_error.get_or_insert_with(|| error.to_string());
+                                    }
+                                    None => {
+                                        finished = Some(cache.flush().map_err(|error| error.to_string()).and_then(|()| {
+                                            if let Some(error) = &work.first_error {
+                                                Err(format!("Imported {} chunks; {} records could not be read. {error}", work.imported, work.skipped))
+                                            } else {
+                                                Ok(work.imported)
+                                            }
+                                        }));
+                                        break;
+                                    }
+                                }
+                                if Instant::now() >= end { break; }
+                            }
+                            if let Some(result) = finished {
+                                let _ = work.reply.try_send(result);
+                            } else {
+                                scan = Some(work);
                             }
                         }
                         if !paused && last_commit.elapsed() >= Duration::from_secs(5) {
@@ -9181,13 +9320,24 @@ pub mod maps {
             Ok(rx)
         }
 
-        pub fn export_png(&self, session: u64, dimension: Dimension, layer: Layer, write: WriteMapPng)
+        pub fn import_save(&self, session: u64, tiles: SavedTiles)
+            -> Result<mpsc::Receiver<Result<usize, String>>, String>
+        {
+            let (reply, rx) = mpsc::sync_channel(1);
+            let wake = self.wake.lock().unwrap_or_else(|error| error.into_inner());
+            let tx = wake.as_ref().ok_or("Cache worker is unavailable")?;
+            tx.try_send(Job::ImportSave(SaveScan { session, tiles, reply, imported: 0, skipped: 0, first_error: None }))
+                .map_err(|_| "Cache worker is busy; try again".to_owned())?;
+            Ok(rx)
+        }
+
+        pub fn export_png(&self, session: u64, export: PngExport, write: WriteMapPng)
             -> Result<mpsc::Receiver<Result<String, String>>, String>
         {
             let (reply, rx) = mpsc::sync_channel(1);
             let wake = self.wake.lock().unwrap_or_else(|e| e.into_inner());
             let tx = wake.as_ref().ok_or("Cache worker is unavailable")?;
-            tx.try_send(Job::Export { session, dimension, layer, write, reply })
+            tx.try_send(Job::Export { session, export, write, reply })
                 .map_err(|_| "Cache worker is busy; try again".to_string())?;
             Ok(rx)
         }
