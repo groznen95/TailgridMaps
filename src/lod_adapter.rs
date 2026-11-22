@@ -1,6 +1,13 @@
 // SPDX-License-Identifier: GPL-3.0-only
 // Injected into Horizon's CPU LOD module. Read existing immutable samples only.
-use std::{collections::BTreeMap, sync::Arc};
+use horizon_client::lod::{Lod, Surface, TileKey};
+use std::{collections::BTreeMap, sync::{Arc, Weak}};
+
+pub struct Snapshot {
+    pub key: TileKey,
+    pub source: Weak<dyn Send + Sync>,
+    pub surfaces: [Option<Surface>; 256],
+}
 
 pub fn priority(
     x: i32,
@@ -22,15 +29,12 @@ pub fn priority(
 }
 
 pub fn snapshots(
-    lod: &horizon_client::lod::Lod,
+    lod: &Lod,
     known: &BTreeMap<(i32, i32, u8), usize>,
     focus: [f64; 2],
     span: [f64; 2],
     limit: usize,
-) -> Vec<(
-    horizon_client::lod::TileKey,
-    Arc<Vec<horizon_client::lod::Column>>,
-)> {
+) -> Vec<Snapshot> {
     let limit = limit.min(8);
     if limit == 0 {
         return Vec::new();
@@ -40,9 +44,6 @@ pub fn snapshots(
         .iter()
         .filter(|(key, columns)| {
             known.get(&(key.x, key.z, key.level)).copied() != Some(Arc::as_ptr(columns) as usize)
-        })
-        .filter(|(_, columns)| {
-            columns.len() == 256 && columns.iter().any(|column| column.surface.is_some())
         })
         .map(|(key, columns)| (priority(key.x, key.z, key.level, focus, span), key, columns))
         .collect();
@@ -54,6 +55,17 @@ pub fn snapshots(
     available
         .into_iter()
         .take(limit)
-        .map(|(_, key, columns)| (*key, Arc::clone(columns)))
+        .map(|(_, key, columns)| {
+            let source: Arc<dyn Send + Sync> = columns.clone();
+            let [x, _, z] = key.origin();
+            let stride = key.size() / 16;
+            // The engine packs columns privately. Sample its displayed surface at
+            // the center of each cell, preferring resident finer samples.
+            let surfaces = std::array::from_fn(|i| lod.surface(
+                x + (i as i32 % 16) * stride + stride / 2,
+                z + (i as i32 / 16) * stride + stride / 2,
+            ));
+            Snapshot { key: *key, source: Arc::downgrade(&source), surfaces }
+        })
         .collect()
 }
