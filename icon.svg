@@ -1,11 +1,20 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="384" height="384" viewBox="0 0 96 96">
-  <title>trail</title>
-  <path d="M0 0h96v96H0z" fill="#0b202a"/>
-  <rect x="2" y="2" width="92" height="92" rx="20" fill="#102b36"/>
-  <path d="M16 38 36 31 59 40 80 32v36l-21 9-23-9-20 7z" fill="#388984"/>
-  <path d="m36 31 23 9v37l-23-9z" fill="#5db4a3"/>
-  <path d="m59 40 21-8v36l-21 9z" fill="#398078"/>
-  <path d="M23 61 36 56l11 4 12-10 14-5" fill="none" stroke="#d7f4e7" stroke-width="4" stroke-linecap="square" stroke-linejoin="round"/>
-  <path d="M47 15c-9 0-16 7-16 16 0 12 16 24 16 24s16-12 16-24c0-9-7-16-16-16z" fill="#ffc264" stroke="#102b36" stroke-width="3.5"/>
-  <circle cx="47" cy="31" r="5.5" fill="#102b36"/>
+<svg xmlns="http://www.w3.org/2000/svg" width="384" height="384" viewBox="0 0 128 128">
+  <title>Kadir's Map</title>
+  <path fill="#0b1d2a" d="M0 0h128v128H0z"/>
+  <path fill="#07141e" d="M13 96h10v-4h82v5h10v10h-9v5H23v-4H13z"/>
+  <path fill="#11424f" d="m16 64 25-16 23 7 24-12 24 15v30l-24 18-24-10-23 9-25-16z"/>
+  <path fill="#092c3e" d="m16 84 25 16 23-9 24 10 24-18v5l-24 18-24-10-23 9-25-16z"/>
+  <path fill="#158a8d" d="m16 62 25-16 23 7 24-12 24 15v24l-24 18-24-10-23 9-25-16z"/>
+  <path fill="#1fbdb4" d="m16 62 25-16 23 7-23 12v32L16 81z"/>
+  <path fill="#0f6979" d="m41 65 23-12 24-12v29L64 88l-23 9z"/>
+  <path fill="#27bdbb" d="m88 41 24 15v24L88 98V70L64 88V62z"/>
+  <path fill="#6cf9e8" d="m16 62 25-16 23 7 24-12 24 15v4L88 45 64 57l-23-7-25 16z"/>
+  <path fill="#103d50" d="m23 78 17-11 14 5 12-9 12 4 25-15v6L78 73l-12-4-12 9-14-5-17 11z"/>
+  <path fill="#8cf9e6" d="m25 78 15-10 14 5 12-9 12 4 22-13v3L78 71l-12-4-12 9-14-5-15 10z"/>
+  <path fill="#0c3543" d="m53 19 20-4 12 8 4 12-2 12-7 11-11 14-5 3-7-6-9-15-6-10V30z"/>
+  <path fill="#159998" d="m50 24 5-8 18-4 11 7 4 9-2 13-7 12-11 14-4 4-5-5-9-12-6-13V30z"/>
+  <path fill="#40e9d5" d="m47 29 7-11 16-4 10 7 3 10-3 10-6 9-10 15-8-10-8-12-3-7z"/>
+  <path fill="#9bfff0" d="m47 29 7-11 16-4 10 7-4 3-8-5-12 3-6 9z"/>
+  <path fill="#103949" d="m56 28 7-5 9 2 4 6-2 7-7 5-8-2-5-6z"/>
+  <path fill="#0b6470" d="m56 28 7-5 9 2 4 6-3 2-3-5-7-1-7 4z"/>
 </svg>
