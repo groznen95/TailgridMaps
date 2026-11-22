@@ -294,7 +294,10 @@ pub fn apply_xaero_settings(game: &mut Game<'_>, mut import: ::trailgrid_maps::x
     use std::{collections::BTreeMap,fs::File,io::{self,Read}};
     let directory=game.native_data_dir(MOD_ID);
     let mut applied=0;
-    let activate_radar=match import.radar_categories.take() {
+    let source = super::minimap_radar_editor::source(&directory, import.profile.as_deref())
+        .ok().flatten()
+        .or_else(|| import.radar_categories.take());
+    let activate_radar=match source {
         Some(source) if xaero_radar_categories(&source,&mut import.unsupported).is_some()=>Some(true),
         Some(_)=>{import.unsupported.push("entity_radar_categories".to_owned());Some(false)}
         None if import.profile.is_some()=>Some(false),

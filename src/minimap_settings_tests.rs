@@ -16,6 +16,21 @@ macro_rules! define_tests {
                 read_profile(path).map(|profile| profile.0)
             }
             #[test]
+            fn zoom_hotkeys_follow_scale_order_and_stop_at_bounds() {
+                for nearer in [true, false] {
+                    let mut current = Settings::default();
+                    let mut steps = 0;
+                    while let Some(index) = current.zoom_step(nearer) {
+                        let prior = current.blocks_per_pixel;
+                        assert!(current.select_option(4, index));
+                        assert_eq!(current.blocks_per_pixel < prior, nearer);
+                        steps += 1;
+                    }
+                    assert_eq!(steps, if nearer { 7 } else { 2 });
+                }
+            }
+
+            #[test]
             fn sdk_choices_cover_saved_preferences_and_reject_actions_and_bad_indices() {
                 let mut keys=std::collections::BTreeSet::new();
                 for (key,button) in SDK_SETTING_ROWS {
@@ -171,6 +186,42 @@ macro_rules! define_tests {
             }
 
             #[test]
+            fn waypoint_batch_move_rejects_conflicts_without_changing_any_marker() {
+                let directory = scratch();
+                let controller = Controller::open(directory.clone());
+                let world = "save:bulk";
+                let mut bridge = point(world, "Bridge");
+                bridge.options.group = "Source".into();
+                let mut duplicate = bridge.clone();
+                duplicate.options.group = "Destination".into();
+                let tower = point(world, "Tower");
+                let other_world = point("save:another", "Tower");
+                for point in [&bridge, &duplicate, &tower, &other_world] {
+                    assert!(controller.add_waypoint(point.clone()));
+                }
+                let keys = BTreeSet::from([bridge.key(), tower.key()]);
+                let before = controller.waypoints(world);
+                assert!(controller.edit_waypoints(world, &keys, WaypointBatch::Move("Destination")).is_err());
+                assert_eq!(controller.waypoints(world), before);
+                assert_eq!(controller.edit_waypoints(world, &keys, WaypointBatch::Visible(false)), Ok(2));
+                assert_eq!(controller.edit_waypoints(world, &keys, WaypointBatch::Move("Other")), Ok(2));
+                assert!(controller.waypoint_group_names(world).contains("Source"));
+                assert_eq!(controller.waypoints("save:another"), vec![other_world]);
+
+                let moved: BTreeSet<_> = controller.waypoints(world).into_iter()
+                    .filter(|point| {
+                        if point.options.group == "Other" { assert!(point.options.disabled); }
+                        point.options.group == "Other"
+                    })
+                    .map(|point| point.key()).collect();
+                assert!(controller.edit_waypoints(world, &keys, WaypointBatch::Delete).is_err());
+                assert_eq!(controller.edit_waypoints(world, &moved, WaypointBatch::Delete), Ok(2));
+                assert_eq!(controller.waypoints(world), vec![duplicate]);
+                controller.shutdown();
+                fs::remove_dir_all(directory).unwrap();
+            }
+
+            #[test]
             fn manual_cave_height_and_server_seed_are_scoped() {
                 let settings = Settings::decode("cave_view=manual\ncave_y=-17\n");
                 assert_eq!(settings.cave_view, minimap::CaveView::Manual);
@@ -302,6 +353,113 @@ macro_rules! define_tests {
             }
 
             #[test]
+            fn manual_server_worlds_keep_default_points_and_remember_selection() {
+                fn wait_for_settings(controller: &Controller) {
+                    for _ in 0..100 {
+                        if controller.settings_loaded() { return; }
+                        thread::sleep(std::time::Duration::from_millis(5));
+                    }
+                    panic!("Settings did not load");
+                }
+
+                let root = scratch();
+                let base = "server:[::1]:25565";
+                let other = "server:example.org";
+                let label = "Spawn: 100%";
+                let scoped = server_subworld_id(base, label);
+                assert_eq!(server_subworld_parts(&scoped), Some((base.into(), label.into())));
+                assert!(!valid_waypoint_world("subworld:server%3Atest:bad:name"));
+                assert_ne!(container::world_path(&root, base), container::world_path(&root, &scoped));
+
+                {
+                    let controller = Controller::open(root.clone());
+                    wait_for_settings(&controller);
+                    assert_eq!(controller.world_for_server(base.into()), base);
+                    assert!(controller.add_waypoint(point(base, "Original")));
+                    assert!(!controller.select_server_world("save:Local", Some(label), None));
+                    assert!(!controller.select_server_world(base, Some("hidden\nline"), None));
+                    assert!(controller.select_server_world(base, Some(label), None));
+                    assert_eq!(controller.world_for_server(base.into()), scoped);
+                    assert_eq!(controller.world_for_server(other.into()), other);
+                    assert!(controller.add_waypoint(point(&scoped, "Subworld waypoint")));
+                    assert!(controller.add_waypoint_groups(&scoped, ["Subworld group".to_owned()]));
+                    assert!(controller.add_death_waypoint(&scoped, Dimension::Overworld, 2, 64, 4, None));
+                }
+                {
+                    let controller = Controller::open(root.clone());
+                    wait_for_settings(&controller);
+                    assert_eq!(controller.world_for_server(base.into()), scoped);
+                    assert_eq!(controller.waypoints(base), vec![point(base, "Original")]);
+                    assert_eq!(controller.waypoints(&scoped).len(), 2);
+                    assert!(controller.waypoint_group_names(&scoped).contains("Subworld group"));
+                    assert!(controller.select_server_world(base, None, None));
+                    assert_eq!(controller.world_for_server(base.into()), base);
+                }
+                {
+                    let controller = Controller::open(root.clone());
+                    wait_for_settings(&controller);
+                    assert_eq!(controller.world_for_server(base.into()), base);
+                    assert!(controller.server_worlds(base).0.contains(label));
+                }
+                fs::remove_dir_all(root).unwrap();
+            }
+
+            #[test]
+            fn server_signals_automatically_restore_maps_without_moving_legacy_data() {
+                fn open_loaded(root: &Path) -> Controller {
+                    let controller = Controller::open(root.to_owned());
+                    for _ in 0..100 {
+                        if controller.settings_loaded() { return controller; }
+                        thread::sleep(std::time::Duration::from_millis(5));
+                    }
+                    panic!("Settings did not load");
+                }
+
+                let root = scratch();
+                fs::create_dir_all(&root).unwrap();
+                let base = "server:smp.example.org:25565";
+                let other_server = "server:another.example.org";
+                let legacy = point(base, "Already saved");
+                fs::write(root.join(SETTINGS_FILE), legacy.encode()).unwrap();
+                let main = ServerWorldSignal::new("minecraft:overworld", -17).unwrap();
+                let nether = ServerWorldSignal::new("minecraft:the_nether", 5).unwrap();
+                let alternate = ServerWorldSignal::new("minecraft:overworld", 99).unwrap();
+                let custom = ServerWorldSignal::new("smp:build/plots", -17).unwrap();
+                assert!(ServerWorldSignal::new("bad:\n", 1).is_none());
+                let alternate_map;
+                {
+                    let controller = open_loaded(&root);
+                    assert!(controller.observe_server_world(base, &main));
+                    assert_eq!(controller.world_for_server(base.into()), base);
+                    assert!(controller.observe_server_world(base, &nether));
+                    assert_eq!(controller.world_for_server(base.into()), base);
+                    assert!(controller.observe_server_world(base, &alternate));
+                    alternate_map = controller.world_for_server(base.into());
+                    assert_ne!(container::world_path(&root, base), container::world_path(&root, &alternate_map));
+                    assert!(controller.add_waypoint(point(&alternate_map, "Alternate")));
+                    assert!(controller.observe_server_world(base, &custom));
+                    assert_ne!(controller.world_for_server(base.into()), alternate_map);
+                    assert!(controller.observe_server_world(base, &main));
+                    assert_eq!(controller.waypoints(base), [legacy.clone()]);
+                    assert_eq!(controller.world_for_server(base.into()), base);
+                }
+                {
+                    let controller = open_loaded(&root);
+                    assert!(controller.observe_server_world(other_server, &alternate));
+                    assert_eq!(controller.world_for_server(other_server.into()), other_server);
+                    assert!(controller.observe_server_world(base, &alternate));
+                    assert_eq!(controller.world_for_server(base.into()), alternate_map);
+                    assert_eq!(controller.waypoints(&alternate_map), [point(&alternate_map, "Alternate")]);
+                    assert!(controller.select_server_world(base, Some("My saved plots"), Some(&custom)));
+                    assert!(controller.observe_server_world(base, &main));
+                    assert!(controller.observe_server_world(base, &custom));
+                    assert_eq!(controller.world_for_server(base.into()), server_subworld_id(base, "My saved plots"));
+                }
+                assert!(fs::read_to_string(root.join(SETTINGS_FILE)).unwrap().contains(&legacy.encode()));
+                fs::remove_dir_all(root).unwrap();
+            }
+
+            #[test]
             fn legacy_waypoints_are_deleted_but_preferences_and_scoped_points_survive() {
                 let directory = scratch();
                 fs::create_dir_all(&directory).unwrap();
@@ -411,13 +569,15 @@ macro_rules! define_tests {
                 let mut settings = Settings::default();
                 assert_eq!(minimap::apply(&mut settings, 11), 1 << 11);
                 assert!(!settings.death_waypoints);
+                assert_eq!(settings.option_index(12), Some(1));
                 assert_eq!(minimap::apply(&mut settings, 12), 1 << 12);
-                assert!(!settings.death_waypoint_auto_remove);
+                assert!(settings.death_waypoint_auto_remove);
+                assert_eq!(settings.option_index(12), Some(0));
                 assert_eq!(Settings::decode(&settings.encode()), settings);
                 let mask = minimap::apply(&mut settings, 6);
                 assert_eq!(mask & (1 << 11), 1 << 11);
                 assert_eq!(mask & (1 << 12), 1 << 12);
-                assert!(settings.death_waypoints && settings.death_waypoint_auto_remove);
+                assert!(settings.death_waypoints && !settings.death_waypoint_auto_remove);
                 assert!(
                     Settings::decode("death_waypoints=false\ndeath_waypoint_auto_remove=false")
                         .encode()
@@ -537,15 +697,18 @@ macro_rules! define_tests {
                     Some("minecraft:dappled_forest")
                 ));
                 assert!(controller.add_death_waypoint(world, Dimension::Overworld, 12, 70, 16, None));
+                assert!(controller.add_death_waypoint(world, Dimension::Overworld, 4, 64, 8, None));
                 assert!(!controller.add_death_waypoint(world, Dimension::Overworld, 4, 64, 8, None));
                 let points = controller.waypoints(world);
                 assert_eq!(points.len(), 2);
-                assert_eq!(points[0].name, "Death");
-                assert_eq!(points[1].name, "Death 2");
+                assert_eq!(points[0].name, "Death 2");
+                assert_eq!(points[0].options.purpose, 2);
+                assert_eq!(points[1].name, "Death");
+                assert_eq!(points[1].options.purpose, 1);
                 assert!(points.iter().all(|point| {
                     point.icon == WaypointIcon::Skull && point.color == DEATH_WAYPOINT_COLOR
                 }));
-                assert_eq!(points[0].biome.as_deref(), Some("minecraft:dappled_forest"));
+                assert_eq!(points[1].biome.as_deref(), Some("minecraft:dappled_forest"));
                 assert!(controller.update_waypoint_biome(
                     world,
                     Dimension::Overworld,
@@ -564,10 +727,34 @@ macro_rules! define_tests {
                 let reopened = Controller::open(directory.clone());
                 reopened.shutdown();
                 let saved = reopened.waypoints(world);
-                assert_eq!(saved[0].biome.as_deref(), Some("minecraft:dappled_forest"));
-                assert_eq!(saved[1].biome.as_deref(), Some("minecraft:plains"));
+                assert_eq!(saved[0].biome.as_deref(), Some("minecraft:plains"));
+                assert_eq!(saved[1].biome.as_deref(), Some("minecraft:dappled_forest"));
                 assert_eq!(saved[0].icon, WaypointIcon::Skull);
                 fs::remove_dir_all(directory).unwrap();
+            }
+
+            #[test]
+            fn respawn_prefers_the_server_death_block_and_ignores_portals_and_reconnects() {
+                let world = "server:example";
+                let mut capture = DeathCapture::new();
+                let previous = (Dimension::Overworld, [21, 74, -7]);
+                let fallback = (Dimension::Overworld, [9, 71, -14]);
+                let authoritative = (Dimension::Nether, [-17, 42, 61]);
+                capture.start(Some(previous));
+                assert_eq!(capture.respawn(world, Some(previous), false, false), None);
+                capture.combat(world.to_owned(), fallback);
+                assert_eq!(capture.respawn(world, Some(authoritative), true, true), Some(authoritative));
+                assert_eq!(capture.respawn(world, Some(authoritative), false, false), None);
+                capture.combat(world.to_owned(), fallback);
+                assert_eq!(capture.respawn(world, None, true, true), Some(fallback));
+                capture.combat(world.to_owned(), fallback);
+                assert_eq!(capture.disconnect(), Some((world.to_owned(), fallback)));
+                assert_eq!(capture.disconnect(), None);
+                capture.start(Some(authoritative));
+                assert_eq!(capture.respawn(world, Some(authoritative), false, false), None);
+                assert_eq!(capture.respawn(world, Some(previous), true, false), Some(previous));
+                capture.combat(world.to_owned(), fallback);
+                assert_eq!(capture.respawn("server:other", Some(authoritative), true, true), None);
             }
 
             #[test]

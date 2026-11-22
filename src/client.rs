@@ -64,6 +64,7 @@ enum Mode {
 enum MapPanel {
     None,
     Waypoints,
+    ServerWorlds,
 }
 
 impl MapPanel {
@@ -406,6 +407,9 @@ fn average_color(sum: [u64; 3], count: u64) -> Option<u32> {
 struct State {
     caches: CacheUi,
     world: String,
+    base_world: String,
+    server_world_signal: Option<runtime::ServerWorldSignal>,
+    server_world_signal_pending: bool,
     session: u64,
     dimension: Dimension,
     seen: BTreeMap<(i32, i32), (Weak<Chunk>, Layer, Instant)>,
@@ -444,10 +448,14 @@ struct State {
     waypoint_sort: usize,
     waypoint_dimension: Dimension,
     waypoint_groups_open: bool,
+    waypoint_group_move: bool,
+    waypoint_bulk: Option<BTreeSet<u64>>,
+    waypoint_confirm_delete: bool,
     waypoint_groups_scroll: usize,
     waypoint_selected: Option<u64>,
     waypoint_group: Option<String>,
     destinations: BTreeMap<u64,Instant>,
+    deaths_outside_reach: BTreeSet<u64>,
     slime_seed: Option<i64>,
     slime_preview: bool,
     slime_overlay: bool,
@@ -463,14 +471,21 @@ struct State {
     xaero_profile: Option<String>,
     map_items: [Option<String>;2],
     pending_copy: Option<String>,
+    pending_chat: Option<(String, String)>,
     pending_command: Option<String>,
     map_focus: Option<Spot>,
     map_panel: MapPanel,
     map_panel_scroll: usize,
+    map_panel_hidden: bool,
+    server_world_name: String,
+    server_world_focus: bool,
     map_settings_change: Option<(String, String)>,
     settings_return: Option<Mode>,
     settings_tab: usize,
     settings_scroll: usize,
+    placement: Option<PlacementEdit>,
+    radar_editor: Option<super::minimap_radar_editor::Editor>,
+    placement_change: Option<Option<[f32; 2]>>,
     /// Chunks the server sent since the last sampling pass. A waypoint's biome
     /// is sampled when its chunk arrives, rather than polling every point.
     biome_chunks: BTreeSet<(i32, i32)>,
@@ -494,6 +509,9 @@ impl Default for State {
         Self {
             caches: CacheUi::default(),
             world: String::new(),
+            base_world: String::new(),
+            server_world_signal: None,
+            server_world_signal_pending: false,
             session: 0,
             dimension: Dimension::Player,
             seen: BTreeMap::new(),
@@ -529,10 +547,14 @@ impl Default for State {
             waypoint_sort: 0,
             waypoint_dimension: Dimension::Player,
             waypoint_groups_open: false,
+            waypoint_group_move: false,
+            waypoint_bulk: None,
+            waypoint_confirm_delete: false,
             waypoint_groups_scroll: 0,
             waypoint_selected: None,
             waypoint_group: None,
             destinations: BTreeMap::new(),
+            deaths_outside_reach: BTreeSet::new(),
             slime_seed: None,
             slime_preview: false,
             slime_overlay: false,
@@ -548,14 +570,21 @@ impl Default for State {
             xaero_profile: None,
             map_items: [None,None],
             pending_copy: None,
+            pending_chat: None,
             pending_command: None,
             map_focus: None,
             map_panel: MapPanel::None,
             map_panel_scroll: 0,
+            map_panel_hidden: false,
+            server_world_name: String::new(),
+            server_world_focus: false,
             map_settings_change: None,
             settings_return: None,
             settings_tab: 0,
             settings_scroll: 0,
+            placement: None,
+            radar_editor: None,
+            placement_change: None,
             biome_chunks: BTreeSet::new(),
             leaves: None,
             lod_elapsed: 1.0,
@@ -575,7 +604,7 @@ fn state() -> std::sync::MutexGuard<'static, State> {
 fn rectangle(width: f32, height: f32) -> [f32; 4] {
     [0.0, 0.0, width.max(1.0), height.max(1.0)]
 }
-fn inside(mouse: [f32; 2], rect: [f32; 4]) -> bool {
+pub(super) fn inside(mouse: [f32; 2], rect: [f32; 4]) -> bool {
     mouse[0] >= rect[0]
         && mouse[1] >= rect[1]
         && mouse[0] < rect[0] + rect[2]
@@ -1067,7 +1096,7 @@ fn waypoint_scale(game: &Game<'_>, key: &str) -> f32 {
     1. + f32::from(game.map_option(key).unwrap_or_default().min(17)) * 0.125
 }
 
-fn set_opacity(batch: &mut HudBatch, start: usize, percent: u8) {
+pub(super) fn set_opacity(batch: &mut HudBatch, start: usize, percent: u8) {
     if percent >= 100 { return; }
     for vertex in &mut batch.vertices[start..] {
         let alpha = (vertex.color >> 24) * u32::from(percent) / 100;
@@ -1079,7 +1108,7 @@ fn default_waypoint_color(state: &State) -> u32 {
     runtime::WAYPOINT_COLORS[state.waypoints.len() % runtime::WAYPOINT_COLORS.len()]
 }
 
-fn fit_text(game: &Game<'_>, text: &str, width: f32) -> String {
+pub(super) fn fit_text(game: &Game<'_>, text: &str, width: f32) -> String {
     if game.map_text_width(text) <= width {
         return text.to_owned();
     }
@@ -2171,7 +2200,7 @@ fn draw_notice(game: &Game<'_>, batch: &mut HudBatch, state: &State) {
     game.map_text(batch, text, [x, y], 0xffffd24a, true);
 }
 
-fn button(
+pub(super) fn button(
     game: &Game<'_>,
     batch: &mut HudBatch,
     rect: [f32; 4],
@@ -2201,7 +2230,7 @@ fn button(
 }
 
 fn waypoint_visible_rows(height: f32) -> usize {
-    (((height - 127.0) / 36.0).floor() as usize).clamp(1, 18)
+    (((height - 151.0) / 36.0).floor() as usize).clamp(1, 18)
 }
 
 fn shown_waypoints(state: &State) -> impl DoubleEndedIterator<Item = (usize, &Waypoint)> {
@@ -2210,10 +2239,15 @@ fn shown_waypoints(state: &State) -> impl DoubleEndedIterator<Item = (usize, &Wa
     })
 }
 
-fn map_waypoint_visible(game: &Game<'_>, state: &State, point: &Waypoint) -> bool {
-    !point.options.disabled && !(point.options.purpose == 2 && game.map_option("old_deathpoints") == Some(0))
+fn waypoint_on_map(game: &Game<'_>, state: &State, point: &Waypoint, include_hidden: bool) -> bool {
+    (!point.options.disabled || include_hidden)
+        && !(point.options.purpose == 2 && game.map_option("old_deathpoints") == Some(0))
         && (game.map_option("all_waypoint_groups") == Some(1) || point.options.visibility % 2 == 1
-        || state.waypoint_group.as_ref().is_none_or(|group| *group == point.options.group))
+            || state.waypoint_group.as_ref().is_none_or(|group| *group == point.options.group))
+}
+
+fn show_hidden_on_map(state: &State, large: bool) -> bool {
+    large && state.map_panel == MapPanel::Waypoints && state.map_panel_hidden
 }
 
 fn waypoint_group_buttons(width: f32) -> [[f32;4];4] {
@@ -2291,9 +2325,14 @@ fn waypoint_3d_rect(row: [f32; 4]) -> [f32; 4] {
     [row[0] + row[2] - 24.0, row[1] + 10.0, 20.0, 18.0]
 }
 
+fn waypoint_scope_rect(row: [f32; 4]) -> [f32; 4] {
+    let toggle = waypoint_3d_rect(row);
+    [toggle[0] - 86., toggle[1], 58., 18.]
+}
+
 // Shared by drawing and hit testing, including narrow GUI viewports.
-fn waypoint_actions(width: f32, height: f32) -> [[f32; 4]; 5] {
-    let button_width = ((width - 48.0) / 5.0).max(1.0);
+fn waypoint_actions(width: f32, height: f32) -> [[f32; 4]; 6] {
+    let button_width = ((width - 54.0) / 6.0).max(1.0);
     std::array::from_fn(|i| {
         [
             12.0 + i as f32 * (button_width + 6.0),
@@ -2304,13 +2343,96 @@ fn waypoint_actions(width: f32, height: f32) -> [[f32; 4]; 5] {
     })
 }
 
+fn waypoint_bulk_actions(width: f32, height: f32) -> [[f32; 4]; 6] {
+    waypoint_actions(width, height - 24.)
+}
+
+fn change_waypoint_group(game: &Game<'_>, state: &mut State, group: Option<String>) {
+    runtime::initialize(game.native_data_dir(runtime::MOD_ID))
+        .select_waypoint_group(&state.world, group.as_deref());
+    state.waypoint_group = group;
+    state.waypoint_scroll = 0;
+    state.map_panel_scroll = 0;
+    state.waypoint_selected = None;
+    state.waypoint_bulk = None;
+    state.waypoint_confirm_delete = false;
+}
+
+fn next_waypoint_group(game: &Game<'_>, state: &mut State) {
+    let groups = waypoint_groups(game, state);
+    let current = groups.iter().position(|group| *group == state.waypoint_group);
+    let next = current.map_or(0, |index| (index + 1) % groups.len());
+    change_waypoint_group(game, state, groups[next].clone());
+}
+
+pub(super) fn cycle_waypoint_group(game: &mut Game<'_>) {
+    let label = {
+        let mut state = state();
+        if state.world.is_empty() || game.map_client_state().as_ref()
+            .and_then(waypoint_identity).as_deref() != Some(state.world.as_str()) {
+            return;
+        }
+        next_waypoint_group(game, &mut state);
+        group_label(state.waypoint_group.as_deref()).to_owned()
+    };
+    game.native_chat(&label);
+}
+
+fn waypoint_group_choices(game: &Game<'_>, state: &State) -> Vec<Option<String>> {
+    let mut groups = waypoint_groups(game, state);
+    if state.waypoint_group_move {
+        groups.remove(0);
+        if groups.first().is_none_or(|group| group.as_deref() != Some("")) {
+            groups.insert(0, Some(String::new()));
+        }
+    }
+    groups
+}
+
+fn edit_waypoint_batch(game: &Game<'_>, state: &mut State, action: runtime::WaypointBatch<'_>) {
+    let Some(keys) = &state.waypoint_bulk else { return };
+    let controller = runtime::initialize(game.native_data_dir(runtime::MOD_ID));
+    let notice = match controller.edit_waypoints(&state.world, keys, action) {
+        Ok(changed) => {
+            if matches!(action, runtime::WaypointBatch::Move(_) | runtime::WaypointBatch::Delete) {
+                state.waypoint_bulk = None;
+                state.waypoint_selected = None;
+            }
+            state.waypoints = controller.waypoints(&state.world);
+            localized_format!("Waypoints updated: {}", "Меток обновлено: {}",
+                "Repères modifiés : {}", "Marcadores actualizados: {}", "Wegpunkte geändert: {}", changed)
+        }
+        Err(error) => error.to_owned(),
+    };
+    state.waypoint_confirm_delete = false;
+    state.notice = Some((notice, Instant::now()));
+}
+
+fn waypoint_search_changed(state: &mut State) {
+    state.waypoint_scroll = 0;
+    state.map_panel_scroll = 0;
+    state.waypoint_selected = None;
+    if let Some(keys) = &mut state.waypoint_bulk { keys.clear(); }
+    state.waypoint_confirm_delete = false;
+}
+
 fn selected_waypoint(state: &State) -> Option<&Waypoint> {
-    let selected = state.waypoint_selected?;
+    let selected = if let Some(keys) = &state.waypoint_bulk {
+        if keys.len() != 1 { return None; }
+        *keys.first()?
+    } else {
+        state.waypoint_selected?
+    };
     shown_waypoints(state).find_map(|(_, point)| (point.key() == selected).then_some(point))
 }
 
 fn show_selected_waypoint(state: &mut State) -> Option<Dimension> {
-    let waypoint = selected_waypoint(state)?;
+    let key = selected_waypoint(state)?.key();
+    focus_waypoint(state, key)
+}
+
+fn focus_waypoint(state: &mut State, key: u64) -> Option<Dimension> {
+    let waypoint = state.waypoints.iter().find(|point| point.key() == key)?;
     if waypoint.world != state.world {
         return None;
     }
@@ -2324,6 +2446,8 @@ fn show_selected_waypoint(state: &mut State) -> Option<Dimension> {
     state.mode = Mode::Map;
     state.menu = None;
     state.dragging = false;
+    state.waypoint_bulk = None;
+    state.waypoint_confirm_delete = false;
     state.elapsed = 1.0;
     Some(spot.dimension)
 }
@@ -2417,7 +2541,9 @@ fn draw_waypoints_screen(game: &Game<'_>, batch: &mut HudBatch, state: &State) {
     }
     let mut biome_tooltip = None;
     for (index, waypoint,row) in visible_waypoint_rows(game,state,batch.width,batch.height) {
-        let selected = state.waypoint_selected == Some(waypoint.key());
+        let selected = state.waypoint_bulk.as_ref().map_or(
+            state.waypoint_selected == Some(waypoint.key()), |keys| keys.contains(&waypoint.key()));
+
         if selected {
             game.native_fill(batch, row, 0xff2e4a3a);
         } else if inside(mouse, row) {
@@ -2438,16 +2564,17 @@ fn draw_waypoints_screen(game: &Game<'_>, batch: &mut HudBatch, state: &State) {
             );
         }
         let name_x = letter_x + game.map_text_width(&letter).max(6.0) + 6.0;
+        let right = waypoint_scope_rect(row)[0] - 6.;
+        let name = fit_text(game, &waypoint.name, right - name_x);
         game.map_text(
             batch,
-            &waypoint.name,
+            &name,
             [name_x, row[1] + 3.0],
             0xffffff,
             false,
         );
         let biome = waypoint.biome.as_deref();
-        let biome_x = name_x + game.map_text_width(&waypoint.name) + 7.0;
-        let right = row[0] + row[2] - 54.0;
+        let biome_x = name_x + game.map_text_width(&name) + 7.0;
         if biome_x + runtime::BIOME_ICON_SIZE as f32 <= right {
             biome_icon(game, batch, biome, [biome_x, row[1] + 3.0]);
             if let Some(biome) = biome {
@@ -2484,7 +2611,7 @@ fn draw_waypoints_screen(game: &Game<'_>, batch: &mut HudBatch, state: &State) {
         }
         game.map_text(
             batch,
-            &detail,
+            &fit_text(game, &detail, right - row[0] - 26.),
             [row[0] + 26.0, row[1] + 25.0],
             0xaaaaaa,
             false,
@@ -2492,6 +2619,13 @@ fn draw_waypoints_screen(game: &Game<'_>, batch: &mut HudBatch, state: &State) {
         let toggle = waypoint_3d_rect(row);
         let on = waypoint.show_3d && !waypoint.options.disabled && !waypoint.map_only();
         let disabled = [toggle[0] - 24.0, toggle[1], 20.0, 18.0];
+        let scope = waypoint_scope_rect(row);
+        let scope_label = if waypoint.options.visibility % 2 == 1 {
+            tr("Global", "Глобальная", "Global", "Global", "Global")
+        } else {
+            tr("Local", "Локальная", "Local", "Local", "Lokal")
+        };
+        button(game, batch, scope, &fit_text(game, scope_label, scope[2] - 6.), mouse, true);
         button(game, batch, disabled, if waypoint.options.disabled { "○" } else { "●" }, mouse, true);
         game.native_fill(batch, toggle, if on { 0xff2e7d52 } else { 0xff2a3542 });
         if inside(mouse, toggle) {
@@ -2510,7 +2644,27 @@ fn draw_waypoints_screen(game: &Game<'_>, batch: &mut HudBatch, state: &State) {
         );
     }
     let selected = selected_waypoint(state);
-    let [rename, delete, show, share, paste] = waypoint_actions(batch.width, batch.height);
+    let [rename, delete, show, share, paste, chat] = waypoint_actions(batch.width, batch.height);
+    let count = state.waypoint_bulk.as_ref().map_or(0, BTreeSet::len);
+    let selecting = state.waypoint_bulk.is_some();
+    let selection_label = if selecting {
+        localized_format!("Finish selecting ({})", "Завершить выбор ({})", "Terminer la sélection ({})",
+            "Terminar selección ({})", "Auswahl beenden ({})", count)
+    } else {
+        tr("Select multiple", "Выбрать несколько", "Sélection multiple", "Seleccionar varios", "Mehrfachauswahl").to_owned()
+    };
+    let three_d = bulk_three_d_value(state);
+    for (rect, (label, enabled)) in waypoint_bulk_actions(batch.width, batch.height).into_iter().zip([
+        (selection_label.as_str(), true),
+        (tr("Select results", "Выбрать результаты", "Sélectionner les résultats", "Seleccionar resultados", "Ergebnisse auswählen"), selecting),
+        (tr("Move to group…", "Перенести в группу…", "Déplacer vers un groupe…", "Mover a un grupo…", "In Gruppe verschieben…"), count != 0),
+        (tr("Enable markers", "Показать метки", "Afficher les repères", "Mostrar marcadores", "Wegpunkte anzeigen"), count != 0),
+        (tr("Hide markers", "Скрыть метки", "Masquer les repères", "Ocultar marcadores", "Wegpunkte ausblenden"), count != 0),
+        (if three_d {tr("Enable 3D", "Включить 3D", "Activer la 3D", "Activar 3D", "3D einschalten")}
+             else {tr("Hide 3D", "Скрыть 3D", "Masquer la 3D", "Ocultar 3D", "3D ausblenden")}, count != 0),
+    ]).filter(|(_, (_, enabled))| selecting || *enabled) {
+        button(game, batch, rect, &fit_text(game, label, rect[2] - 6.), mouse, enabled);
+    }
     button(
         game,
         batch,
@@ -2523,9 +2677,13 @@ fn draw_waypoints_screen(game: &Game<'_>, batch: &mut HudBatch, state: &State) {
         game,
         batch,
         delete,
-        tr("Delete", "Удалить", "Supprimer", "Eliminar", "Löschen"),
+        if state.waypoint_confirm_delete {
+            tr("Confirm delete", "Подтвердить удаление", "Confirmer", "Confirmar", "Löschen bestätigen")
+        } else {
+            tr("Delete", "Удалить", "Supprimer", "Eliminar", "Löschen")
+        },
         mouse,
-        selected.is_some(),
+        selected.is_some() || count != 0,
     );
     button(
         game,
@@ -2543,17 +2701,19 @@ fn draw_waypoints_screen(game: &Game<'_>, batch: &mut HudBatch, state: &State) {
     );
     button(game, batch, share, tr("Copy link", "Копировать", "Copier le lien", "Copiar enlace", "Link kopieren"), mouse, selected.is_some());
     button(game, batch, paste, tr("Paste link", "Вставить", "Coller le lien", "Pegar enlace", "Link einfügen"), mouse, true);
+    button(game, batch, chat, tr("Open in chat", "Открыть в чате", "Ouvrir dans le chat",
+        "Abrir en el chat", "Im Chat öffnen"), mouse, selected.is_some());
     draw_notice(game, batch, state);
     if let Some(label) = biome_tooltip {
         draw_tooltip(game, batch, &label, mouse);
     }
     if state.waypoint_groups_open {
-        let groups=waypoint_groups(game,state);
+        let groups=waypoint_group_choices(game,state);
         let count=visible_group_rows(batch.height);
         let start=state.waypoint_groups_scroll.min(groups.len().saturating_sub(count));
         for (i,group) in groups.into_iter().skip(start).take(count).enumerate() {
             let row=group_row(batch.width,i);
-            let selected=group==state.waypoint_group;
+            let selected=!state.waypoint_group_move && group==state.waypoint_group;
             let label=if selected {format!("✓ {}",group_label(group.as_deref()))}
                 else {group_label(group.as_deref()).to_owned()};
             button(game,batch,row,&fit_text(game,&label,row[2]-8.),mouse,true);
@@ -2732,7 +2892,7 @@ fn waypoint_at_pointer<'a>(
         .iter()
         .enumerate()
         .find(|(index, waypoint)| {
-            if waypoint.dimension != view.dimension || !map_waypoint_visible(game, state, waypoint) {
+            if waypoint.dimension != view.dimension || !waypoint_on_map(game, state, waypoint, show_hidden_on_map(state, view.large)) {
                 return false;
             }
             let pixel = view.screen_at([f64::from(waypoint.x) + 0.5, f64::from(waypoint.z) + 0.5]);
@@ -3308,7 +3468,7 @@ fn draw_world_waypoints(
     let mut hover_shown = false;
     for (index, waypoint) in state.waypoints.iter().enumerate() {
         if !waypoint.show_3d || waypoint.map_only() || waypoint.dimension != dimension
-            || !map_waypoint_visible(game, state, waypoint)
+            || !waypoint_on_map(game, state, waypoint, false)
         {
             continue;
         }
@@ -3318,7 +3478,8 @@ fn draw_world_waypoints(
             f64::from(waypoint.z) + 0.5,
         ];
         let distance2 = (world[0]-player.x).powi(2) + (world[1]-player.y).powi(2) + (world[2]-player.z).powi(2);
-        if distance2 < min_distance.powi(2) || (max_distance > 0. && distance2 > max_distance.powi(2)) {
+        if distance2 < min_distance.powi(2)
+            || (waypoint.options.visibility % 2 == 0 && max_distance > 0. && distance2 > max_distance.powi(2)) {
             continue;
         }
         let scale=base_scale*(1.+(close_scale-1.)*(1.-distance2.sqrt() as f32/12.).clamp(0.,1.));
@@ -3428,7 +3589,7 @@ fn official_smp(game: &Game<'_>) -> bool {
     })
 }
 
-fn waypoint_identity(identity: &super::minimap_compat::ClientState) -> Option<String> {
+fn base_world(identity: &super::minimap_compat::ClientState) -> Option<String> {
     use super::minimap_compat::WorldId as NativeWorldId;
     match identity.world.as_ref()? {
         NativeWorldId::Singleplayer(folder) => runtime::waypoint_world(true, folder),
@@ -3436,8 +3597,33 @@ fn waypoint_identity(identity: &super::minimap_compat::ClientState) -> Option<St
     }
 }
 
-/// Hears the server's death screen packet. The player has not respawned yet,
-/// so their current block position is the place they died.
+fn waypoint_identity(identity: &super::minimap_compat::ClientState) -> Option<String> {
+    base_world(identity).map(runtime::active_world)
+}
+
+static DEATH_CAPTURE: Mutex<runtime::DeathCapture> = Mutex::new(runtime::DeathCapture::new());
+
+fn protocol_death(position: Option<&horizon_protocol::packets::play::GlobalPos>) -> Option<runtime::DeathLocation> {
+    let position = position?;
+    let dimension = Dimension::from_id(&position.dimension);
+    (dimension != Dimension::Player).then_some((dimension, position.pos))
+}
+
+fn record_death(game: &Game<'_>, world: &str, (dimension, [x, y, z]): runtime::DeathLocation) {
+    let controller = runtime::initialize(game.native_data_dir(runtime::MOD_ID));
+    if !controller.settings().death_waypoints { return; }
+    let biome = known_biome(game, dimension, [x, y, z]);
+    if controller.add_death_waypoint(world, dimension, x, y, z, biome.as_deref()) {
+        let mut state = state();
+        if state.world == world {
+            state.deaths_outside_reach.clear();
+            if game.map_option("auto_subworld_on_death") != Some(0) {
+                change_waypoint_group(game, &mut state, None);
+            }
+        }
+    }
+}
+
 pub(super) fn client_packet(
     game: &mut Game<'_>,
     packet: &horizon_protocol::packets::play::Clientbound,
@@ -3445,9 +3631,6 @@ pub(super) fn client_packet(
     use horizon_protocol::packets::play::Clientbound;
     if !game.native_window() || !game.map_on(runtime::MOD_ID) {
         return;
-    }
-    if matches!(packet, Clientbound::Login(_)) {
-        WAYSTONES.lock().unwrap_or_else(|error| error.into_inner()).clear();
     }
     match packet {
         Clientbound::CustomPayload(payload) if payload.channel == "openpartiesandclaims:main" => {
@@ -3459,8 +3642,23 @@ pub(super) fn client_packet(
                 &payload.channel, &payload.data,
             );
         }
-        Clientbound::Login(_) | Clientbound::Respawn(_) => {
+        Clientbound::Login(login) => {
+            observe_world_packet(&login.spawn);
+            WAYSTONES.lock().unwrap_or_else(|error| error.into_inner()).clear();
             LOCATOR_WAYPOINTS.lock().unwrap_or_else(|error| error.into_inner()).clear();
+            DEATH_CAPTURE.lock().unwrap_or_else(|error| error.into_inner())
+                .start(protocol_death(login.spawn.last_death.as_ref()));
+        }
+        Clientbound::Respawn(respawn) => {
+            observe_world_packet(&respawn.spawn);
+            LOCATOR_WAYPOINTS.lock().unwrap_or_else(|error| error.into_inner()).clear();
+            let Some(world) = game.map_client_state().as_ref().and_then(waypoint_identity) else { return; };
+            // A dimension change retains entity data. An actual respawn can
+            // include the server's block of death, even in a different dimension.
+            let location = DEATH_CAPTURE.lock().unwrap_or_else(|error| error.into_inner())
+                .respawn(&world, protocol_death(respawn.spawn.last_death.as_ref()),
+                    respawn.keep & 2 == 0, game.screen == super::Screen::Dead);
+            if let Some(location) = location { record_death(game, &world, location); }
         }
         Clientbound::TrackedWaypoint(waypoint) => {
             apply_locator_waypoint(&mut LOCATOR_WAYPOINTS.lock().unwrap_or_else(|error| error.into_inner()),waypoint);
@@ -3473,42 +3671,25 @@ pub(super) fn client_packet(
         Clientbound::PlayerCombatKill(death)
             if game.remote.as_ref().is_some_and(|remote| remote.entity_id == death.id) =>
         {
-            let controller = runtime::initialize(game.native_data_dir(runtime::MOD_ID));
-            if !controller.settings().death_waypoints {
-                return;
-            }
-            let Some(player) = game.native_player() else {
-                return;
-            };
-            let Some(identity) = game.map_client_state() else {
-                return;
-            };
-            let Some(world) = waypoint_identity(&identity) else {
-                return;
-            };
+            let Some(player) = game.native_player() else { return; };
+            let Some(world) = game.map_client_state().as_ref().and_then(waypoint_identity) else { return; };
             let dimension = Dimension::from_id(player.dimension);
-            if dimension == Dimension::Player {
-                return;
-            }
-            let at = [
-                player.x.floor() as i32,
-                player.y.floor() as i32,
-                player.z.floor() as i32,
-            ];
-            let biome = known_biome(game, dimension, at);
-            if controller.add_death_waypoint(&world, dimension, at[0], at[1], at[2], biome.as_deref())
-                && game.map_option("auto_subworld_on_death") != Some(0)
-            {
-                let mut state = state();
-                if state.world == world {
-                    state.waypoint_group = None;
-                    state.waypoint_scroll = 0;
-                    state.waypoint_selected = None;
-                    controller.select_waypoint_group(&world, None);
-                }
+            if dimension != Dimension::Player {
+                let fallback = [player.x, player.y, player.z].map(|value| value.floor() as i32);
+                DEATH_CAPTURE.lock().unwrap_or_else(|error| error.into_inner())
+                    .combat(world, (dimension, fallback));
             }
         }
         _ => {}
+    }
+}
+
+fn observe_world_packet(spawn: &horizon_protocol::packets::play::SpawnInfo) {
+    let signal = runtime::ServerWorldSignal::new(&spawn.dimension, spawn.seed);
+    let mut state = state();
+    if state.server_world_signal != signal {
+        state.server_world_signal = signal;
+        state.server_world_signal_pending = true;
     }
 }
 
@@ -3582,16 +3763,43 @@ pub(super) fn frame(game: &mut Game<'_>, elapsed: Duration) {
     let Some(identity) = game.map_client_state() else {
         return;
     };
-    let (copy, command, change) = {
+    if !controller.settings_loaded() {
+        return;
+    }
+    let base_world = base_world(&identity).unwrap_or_default();
+    let (copy, chat, command, change, placement) = {
         let mut state = state();
-        (state.pending_copy.take(), state.pending_command.take(), state.map_settings_change.take())
+        if base_world.starts_with("server:")
+            && std::mem::take(&mut state.server_world_signal_pending)
+            && let Some(signal) = &state.server_world_signal
+            && controller.observe_server_world(&base_world, signal)
+        {
+            log::info!("[map-auto-world] Applied the server's world identity");
+        }
+        (state.pending_copy.take(), state.pending_chat.take(), state.pending_command.take(),
+            state.map_settings_change.take(), state.placement_change.take())
     };
     if let Some((key, value)) = change {
         super::minimap_compat::write_map_setting(game, &key, &value);
     }
+    if let Some(placement) = placement {
+        use super::minimap_compat::write_map_setting;
+        if let Some([x, y]) = placement {
+            write_map_setting(game, "minimap_position_x", &(x * 10000.).round().to_string());
+            write_map_setting(game, "minimap_position_y", &(y * 10000.).round().to_string());
+        }
+        write_map_setting(game, "minimap_position_custom", &placement.is_some().to_string());
+    }
     if let Some(text) = copy {
         use horizon_client::clipboard::Clipboard;
         game.clipboard.set(&text);
+    }
+    if let Some((world, link)) = chat
+        && waypoint_identity(&identity).as_deref() == Some(world.as_str())
+    {
+        game.mod_screen_close(runtime::MOD_ID);
+        runtime::set_text_input(false);
+        if let Err(error) = game.open_chat(&link) { game.native_chat(&error); }
     }
     if let Some(command) = command {
         game.click_command(&command);
@@ -3676,7 +3884,11 @@ pub(super) fn frame(game: &mut Game<'_>, elapsed: Duration) {
             state.name_form = None;
             state.menu = None;
             state.waypoint_search_focus = false;
+            state.server_world_focus = false;
             state.waypoint_groups_open = false;
+            state.waypoint_group_move = false;
+            state.waypoint_bulk = None;
+            state.waypoint_confirm_delete = false;
             state.waypoint_selected = None;
             runtime::set_text_input(false);
             if request == runtime::ScreenRequest::Create {
@@ -3685,9 +3897,13 @@ pub(super) fn frame(game: &mut Game<'_>, elapsed: Duration) {
         }
     }
     state.portals = controller.maps.portals();
-    let world = waypoint_identity(&identity).unwrap_or_default();
+    let world = runtime::active_world(base_world.clone());
     if state.world != world {
         controller.clear_temporary_waypoints(&state.world);
+        let same_server = state.base_world == base_world && base_world.starts_with("server:");
+        let keep_panel = same_server && state.map_panel == MapPanel::ServerWorlds
+            && game.mod_screen() == Some(runtime::MOD_ID);
+        runtime::set_text_input(false);
         let next = state.session + 1;
         if let Err(error) = ::trailgrid_maps::radar::load_rules(&game.native_data_dir(runtime::MOD_ID), false) {
             eprintln!("[{}] Radar rules: {error}", runtime::MOD_ID);
@@ -3706,7 +3922,13 @@ pub(super) fn frame(game: &mut Game<'_>, elapsed: Duration) {
         *state = State {
             waypoint_group: controller.active_waypoint_group(&world),
             world,
+            base_world,
+            server_world_signal: state.server_world_signal.take(),
+            server_world_signal_pending: state.server_world_signal_pending,
             session: next,
+            map_panel: if keep_panel { MapPanel::ServerWorlds } else { MapPanel::None },
+            map_panel_scroll: if keep_panel { state.map_panel_scroll } else { 0 },
+            opac: if same_server { std::mem::take(&mut state.opac) } else { Default::default() },
             slime_seed,
             xaero_profile: ::trailgrid_maps::xaero_settings::active_profile(&game.native_data_dir(runtime::MOD_ID)),
             pending_command: (official_smp(game)
@@ -3737,10 +3959,10 @@ pub(super) fn frame(game: &mut Game<'_>, elapsed: Duration) {
     let enabled = game.map_option("use_xaero_radar") == Some(1);
     if state.xaero_radar_enabled != Some(enabled) {
         let categories = enabled.then(|| {
-            use ::trailgrid_maps::xaero_settings;
-            let directory=xaero_settings::profile_directory(&game.native_data_dir(runtime::MOD_ID),state.xaero_profile.as_deref());
-            let source=xaero_settings::read_radar_categories(&directory).ok().flatten()?;
-            super::minimap_compat::xaero_radar_categories(&source,&mut Vec::new())
+            let directory = game.native_data_dir(runtime::MOD_ID);
+            let source = super::minimap_radar_editor::source(&directory, state.xaero_profile.as_deref())
+                .ok().flatten()?;
+            super::minimap_compat::xaero_radar_categories(&source, &mut Vec::new())
         }).flatten();
         use ::trailgrid_maps::xaero_settings;
         let directory=game.native_data_dir(runtime::MOD_ID);
@@ -3792,7 +4014,7 @@ pub(super) fn frame(game: &mut Game<'_>, elapsed: Duration) {
     use runtime::minimap::CaveView;
     let screen_open=game.mod_screen()==Some(runtime::MOD_ID);
     let large=screen_open && (state.mode==Mode::Map ||
-        state.mode==Mode::Settings && state.settings_return==Some(Mode::Map));
+        state.mode==Mode::Settings && state.placement.is_none() && state.settings_return==Some(Mode::Map));
     let appearance = terrain_appearance(game, large);
     if state.appearance != appearance {
         state.seen.clear();
@@ -3850,8 +4072,10 @@ pub(super) fn frame(game: &mut Game<'_>, elapsed: Duration) {
         let mut reached = Vec::new();
         let mut previous = std::mem::take(&mut state.destinations);
         let mut destinations = BTreeMap::new();
+        let mut was_outside = std::mem::take(&mut state.deaths_outside_reach);
+        let mut outside_reach = BTreeSet::new();
         for point in state.waypoints.iter().filter(|point| {
-            point.options.destination || (point.dimension==dimension && point.icon==runtime::WaypointIcon::Skull)
+            point.options.destination || (settings.death_waypoint_auto_remove && point.icon==runtime::WaypointIcon::Skull)
         }) {
             let key = point.key();
             let mut arrived = false;
@@ -3860,11 +4084,18 @@ pub(super) fn frame(game: &mut Game<'_>, elapsed: Duration) {
                 arrived = point.dimension==dimension && start.elapsed()>=Duration::from_secs(5) && point.within_reach(at);
                 if !arrived {destinations.insert(key,start);}
             }
-            if arrived || (point.dimension==dimension && settings.death_waypoint_auto_remove && runtime::death_waypoint_reached(at,point)) {
-                reached.push(key);
+            let mut returned = false;
+            if settings.death_waypoint_auto_remove && point.icon == runtime::WaypointIcon::Skull {
+                if point.dimension != dimension || !runtime::death_waypoint_reached(at, point) {
+                    outside_reach.insert(key);
+                } else {
+                    returned = was_outside.remove(&key);
+                }
             }
+            if arrived || returned { reached.push(key); }
         }
         state.destinations = destinations;
+        state.deaths_outside_reach = outside_reach;
         if !reached.is_empty() {
             for key in reached {
                 controller.delete_waypoint(&state.world, key);
@@ -4791,7 +5022,8 @@ fn draw_hud(game: &Game<'_>, batch: &mut HudBatch, corners: &mut Corners) {
                 runtime::minimap::Corner::BottomLeft => Corner::BottomLeft,
                 runtime::minimap::Corner::BottomRight => Corner::BottomRight,
             };
-            if game.native_corner_shown(corner) {
+            let custom = custom_minimap_position(game);
+            if custom.is_some() || game.native_corner_shown(corner) {
                 let state = state();
                 let lines = minimap_lines(game, &state, settings);
                 let scale = minimap_ui_scale(game);
@@ -4800,7 +5032,9 @@ fn draw_hud(game: &Game<'_>, batch: &mut HudBatch, corners: &mut Corners) {
                 let width = lines.iter()
                     .map(|(line, _, _)| game.map_text_width(line) * scale + 4.)
                     .fold(size, f32::max);
-                let (x, mut y) = corners.place(corner, width, size + footer);
+                let (x, mut y) = if custom.is_none() {
+                    corners.place(corner, width, size + footer)
+                } else { (0., 0.) };
                 let effects = game.map_option("minimap_effect_push").unwrap_or(1);
                 if corner == Corner::TopRight && effects == 0 {
                     y -= effect_height(game);
@@ -4823,7 +5057,12 @@ fn draw_hud(game: &Game<'_>, batch: &mut HudBatch, corners: &mut Corners) {
                     x
                 };
                 let centered = quick_minimap() && game.map_option("quick_minimap_centered") == Some(1);
-                let (map_x,y) = if centered { ((batch.width-size)*0.5,(batch.height-size-footer)*0.5) } else { (map_x,y) };
+                let (map_x,y) = if centered {
+                    ((batch.width-size)*0.5,(batch.height-size-footer)*0.5)
+                } else if let Some(position) = custom {
+                    let span = placement_span([batch.width, batch.height], size, footer);
+                    (position[0] * span[0], position[1] * span[1])
+                } else { (map_x,y) };
                 let rect = [map_x, y, size, size];
                 let first_vertex = batch.vertices.len();
                 draw(game, batch, &state, rect, false, None);
@@ -4834,7 +5073,9 @@ fn draw_hud(game: &Game<'_>, batch: &mut HudBatch, corners: &mut Corners) {
                 }
                 set_opacity(batch, first_vertex, game.map_option("minimap_opacity").unwrap_or(100));
                 if !lines.is_empty() {
-                    let left = if centered { map_x + (size - width) * 0.5 } else { x };
+                    let left = if centered || custom.is_some() {
+                        (map_x + (size - width) * 0.5).clamp(0., (batch.width - width).max(0.))
+                    } else { x };
                     let top = y + size + 2.;
                     let opacity = u32::from(game.map_option("minimap_info_background").unwrap_or(40).min(100));
                     game.native_fill(batch, [left, top, width, footer - 2.], (opacity * 255 / 100) << 24);
@@ -5274,6 +5515,9 @@ pub(super) fn tick_radar(game: &Game<'_>) {
 }
 
 fn radar_icon(game: &Game<'_>, batch: &mut HudBatch, mob: Option<&horizon_client::mobs::Mob>, dot: &::trailgrid_maps::radar::Dot, dst: [f32;4], opacity: u32) -> bool {
+    if let Some(drawn) = super::minimap_radar_icons::render(game, batch, mob, &dot.kind, dst, opacity) {
+        return drawn;
+    }
     if dot.kind == "minecraft:player" {
         let skin = mob.map(|mob| mob.skin.as_deref().unwrap_or(&mob.kind.texture)).unwrap_or("entity/player/wide/steve");
         if game.native_sprite(batch, skin, [8.,8.,8.,8.], dst, Some(opacity | 0xffffff)) {
@@ -5763,7 +6007,7 @@ fn draw(
             .waypoints
             .iter()
             .enumerate()
-            .filter(|(_, waypoint)| waypoint.dimension == frame.view.dimension && map_waypoint_visible(game, state, waypoint))
+            .filter(|(_, waypoint)| waypoint.dimension == frame.view.dimension && waypoint_on_map(game, state, waypoint, show_hidden_on_map(state, large)))
             .filter(|_| game.map_option(if large {"world_map_waypoints"} else {"minimap_waypoints"}) != Some(0)
                 && (!large || f64::from(rect[2])/frame.view.span[0]>=game.map_number("world_waypoint_zoom_min").unwrap_or(0.)))
         {
@@ -6176,23 +6420,58 @@ fn export_map_png(game: &Game<'_>, state: &mut State, dimension: Dimension) {
     state.notice = Some((text, Instant::now()));
 }
 
-fn map_tools(width: f32) -> [[f32; 4]; 4] {
-    let w = ((width - 22.) / 4.).clamp(1., 100.);
-    std::array::from_fn(|i| [width - 8. - (4 - i) as f32 * w - (3 - i) as f32 * 2., 60., w, 20.])
+fn map_tools(width: f32, state: &State) -> impl Iterator<Item = [f32; 4]> + use<> {
+    let count = if state.base_world.starts_with("server:") { 6 } else { 5 };
+    let w = ((width - 14. - 2. * count as f32) / count as f32).clamp(1., 100.);
+    (0..count).map(move |i| {
+        let remaining = (count - i) as f32;
+        [width - 6. - remaining * (w + 2.), 60., w, 20.]
+    })
+}
+
+fn latest_death(state: &State) -> Option<&Waypoint> {
+    let mut deaths = state.waypoints.iter().rev().filter(|point| point.icon == runtime::WaypointIcon::Skull);
+    deaths.clone().find(|point| point.options.purpose == 1).or_else(|| deaths.next())
 }
 
 fn map_panel_rows(height: f32) -> usize {
-    (((height - 186.) / 20.).floor() as usize).clamp(1, 12)
+    (((height - 238.) / 20.).floor() as usize).clamp(1, 12)
 }
 
 fn map_panel_rect(width: f32, height: f32) -> [f32; 4] {
     let w = (width - 16.).clamp(1., 228.);
-    let body = 20. * map_panel_rows(height) as f32 + 24.;
+    let body = 20. * map_panel_rows(height) as f32 + 76.;
     [width - w - 8., 84., w, body + 26.]
 }
 
 fn map_panel_row(panel: [f32; 4], index: usize) -> [f32; 4] {
-    [panel[0] + 5., panel[1] + 24. + 20. * index as f32, (panel[2] - 10.).max(1.), 18.]
+    [panel[0] + 5., panel[1] + 78. + 20. * index as f32, (panel[2] - 10.).max(1.), 18.]
+}
+
+fn map_panel_fields(panel: [f32; 4]) -> [[f32; 4]; 4] {
+    let [x, y, w, _] = panel;
+    let half = (w - 14.) * 0.5;
+    [
+        [x + 5., y + 20., w - 10., 17.],
+        [x + 5., y + 39., w - 10., 17.],
+        [x + 5., y + 58., half, 17.],
+        [x + 9. + half, y + 58., half, 17.],
+    ]
+}
+
+fn map_panel_waypoints<'a>(game: &Game<'_>, state: &'a State) -> Vec<&'a Waypoint> {
+    let query = state.waypoint_search.trim().to_lowercase();
+    state.waypoints.iter().filter(|point| {
+        waypoint_on_map(game, state, point, state.map_panel_hidden)
+            && (query.is_empty() || point.name.to_lowercase().contains(&query))
+    }).collect()
+}
+
+fn visible_map_panel_waypoints<'a>(game: &Game<'_>, state: &'a State, height: f32) -> Vec<&'a Waypoint> {
+    let points = map_panel_waypoints(game, state);
+    let count = map_panel_rows(height);
+    let start = state.map_panel_scroll.min(points.len().saturating_sub(count));
+    points.into_iter().skip(start).take(count).collect()
 }
 
 const SETTING_CATEGORIES: usize = 5;
@@ -6229,7 +6508,7 @@ fn settings_catalog<'a>(game: &'a Game<'_>, category: usize) -> impl Iterator<It
         .flat_map(|page|page.settings.iter()).filter(move |row| setting_category(&row.key)==category)
 }
 
-fn settings_panel(w: f32, h: f32) -> [f32;4] {
+pub(super) fn settings_panel(w: f32, h: f32) -> [f32;4] {
     let width = (w-20.).clamp(1.,670.);
     let height = (h-24.).clamp(1.,600.);
     [(w-width)*0.5,(h-height)*0.5,width,height]
@@ -6265,7 +6544,108 @@ fn setting_value(game: &Game<'_>, value:&horizon_client::mod_list::NativeSetting
     }
 }
 
+#[derive(Clone, Copy)]
+struct PlacementEdit {
+    position: [f32; 2],
+    span: [f32; 2],
+}
+
+impl PlacementEdit {
+    fn move_by(&mut self, pixels: [f32; 2]) {
+        for (axis, delta) in pixels.into_iter().enumerate() {
+            if self.span[axis] > 0. {
+                self.position[axis] = (self.position[axis] + delta / self.span[axis]).clamp(0., 1.);
+            }
+        }
+    }
+}
+
+fn custom_minimap_position(game: &Game<'_>) -> Option<[f32; 2]> {
+    (game.map_option("minimap_position_custom") == Some(1)).then(|| {
+        ["minimap_position_x", "minimap_position_y"].map(|key| {
+            (game.map_number(key).unwrap_or_default() as f32 / 10000.).clamp(0., 1.)
+        })
+    })
+}
+
+fn placement_span(viewport: [f32; 2], size: f32, footer: f32) -> [f32; 2] {
+    [(viewport[0] - size).max(0.), (viewport[1] - size - footer).max(0.)]
+}
+
+fn placement_size(game: &Game<'_>, state: &State, viewport: [f32; 2])
+    -> (runtime::minimap::Settings, f32, [f32; 2])
+{
+    let settings = runtime::initialize(game.native_data_dir(runtime::MOD_ID)).settings();
+    let size = fitted_minimap_size(game, settings, viewport[0], viewport[1]).unwrap_or(64.);
+    let lines = minimap_lines(game, state, settings).len();
+    let footer = if lines == 0 { 0. } else { lines as f32 * 12. * minimap_ui_scale(game) + 2. };
+    (settings, size, placement_span(viewport, size, footer))
+}
+
+fn placement_buttons(viewport: [f32; 2]) -> [[f32; 4]; 3] {
+    let width = ((viewport[0] - 20.) / 3.).clamp(1., 110.);
+    std::array::from_fn(|i| {
+        [(viewport[0] - 3. * width) * 0.5 + i as f32 * width + 2.,
+            viewport[1] - 29., (width - 4.).max(1.), 22.]
+    })
+}
+
+fn draw_placement(game: &Game<'_>, batch: &mut HudBatch, state: &State, edit: PlacementEdit) {
+    let viewport = [batch.width, batch.height];
+    let (settings, size, span) = placement_size(game, state, viewport);
+    game.native_fill(batch, [0., 0., batch.width, batch.height], 0xb710171e);
+    let rect = [edit.position[0] * span[0], edit.position[1] * span[1], size, size];
+    draw(game, batch, state, rect, false, None);
+    draw_minimap_frame(game, batch, rect, settings.round);
+    let hint = tr("Drag the minimap or use the arrow keys", "Перетащи мини-карту или используй стрелки",
+        "Déplacez la minicarte ou utilisez les flèches", "Arrastra el minimapa o usa las flechas",
+        "Minikarte ziehen oder Pfeiltasten verwenden");
+    game.map_text(batch, &fit_text(game, hint, batch.width - 16.), [8., 8.], 0xfff0f5f8, true);
+    for (rect, label) in placement_buttons(viewport).into_iter().zip([
+        tr("Save", "Сохранить", "Enregistrer", "Guardar", "Speichern"),
+        tr("Use corner", "В угол", "Utiliser le coin", "Usar esquina", "Ecke verwenden"),
+        tr("Cancel", "Отмена", "Annuler", "Cancelar", "Abbrechen"),
+    ]) {
+        button(game, batch, rect, &fit_text(game, label, rect[2] - 6.), game.cursor(), true);
+    }
+}
+
+fn placement_press(game: &Game<'_>, state: &mut State, screen: &mod_api::ScreenView<'_>) {
+    let viewport = [screen.rect[2], screen.rect[3]];
+    let buttons = placement_buttons(viewport);
+    if let Some(index) = buttons.iter().position(|rect| inside(screen.mouse, *rect)) {
+        let edit = state.placement.take().unwrap();
+        match index {
+            0 => state.placement_change = Some(Some(edit.position)),
+            1 => state.placement_change = Some(None),
+            _ => {}
+        }
+        return;
+    }
+    let (_, size, span) = placement_size(game, state, viewport);
+    let edit = state.placement.as_mut().unwrap();
+    edit.span = span;
+    let rect = [edit.position[0] * span[0], edit.position[1] * span[1], size, size];
+    if !inside(screen.mouse, rect) {
+        edit.move_by([screen.mouse[0] - rect[0] - size / 2., screen.mouse[1] - rect[1] - size / 2.]);
+    }
+}
+
+fn settings_action(panel: [f32; 4]) -> [f32; 4] {
+    let right = settings_back(panel)[0] - 5.;
+    let left = (right - 157.).max(panel[0] + 75.);
+    [left, panel[1] + panel[3] - 28., (right - left).max(1.), 20.]
+}
+
 fn draw_settings(game: &Game<'_>, batch: &mut HudBatch, state: &State) {
+    if let Some(edit) = state.placement {
+        draw_placement(game, batch, state, edit);
+        return;
+    }
+    if let Some(editor) = &state.radar_editor {
+        super::minimap_radar_editor::draw(game, batch, editor);
+        return;
+    }
     if state.settings_return==Some(Mode::Map) {
         draw_map_screen(game,batch,state);
     }
@@ -6305,14 +6685,30 @@ fn draw_settings(game: &Game<'_>, batch: &mut HudBatch, state: &State) {
     }
     let shown = if total == 0 {0} else {start+1};
     game.map_text(batch,&format!("{shown}–{} / {total}",(start+count).min(total)),[panel[0]+10.,panel[1]+panel[3]-22.],0xffb9cbd8,false);
+    if matches!(state.settings_tab, 0 | 3) {
+        let rect = settings_action(panel);
+        let label = if state.settings_tab == 0 {
+            tr("Change position", "Положение на экране", "Changer la position",
+                "Cambiar posición", "Position ändern")
+        } else {
+            tr("Radar categories", "Категории радара", "Catégories du radar",
+                "Categorías de radar", "Radarkategorien")
+        };
+        button(game, batch, rect, &fit_text(game, label, rect[2] - 6.), mouse, true);
+    }
     button(game,batch,settings_back(panel),tr("Back","Назад","Retour","Volver","Zurück"),mouse,true);
+    draw_notice(game, batch, state);
 }
 
 fn open_settings(state:&mut State, back:Option<Mode>, tab:usize) {
     state.settings_return=back;
+    state.placement=None;
+    state.radar_editor=None;
     state.settings_tab=tab;
     state.settings_scroll=0;
     state.map_panel=MapPanel::None;
+    state.waypoint_search_focus=false;
+    state.server_world_focus=false;
     state.dragging=false;
     state.menu=None;
     state.mode=Mode::Settings;
@@ -6324,10 +6720,46 @@ fn close_settings(state:&mut State) {
 }
 
 fn settings_press(game:&Game<'_>, state:&mut State, screen:&mod_api::ScreenView<'_>, button:i32) {
+    if state.placement.is_some() {
+        if button == 0 { placement_press(game, state, screen); }
+        return;
+    }
+    if let Some(editor) = &mut state.radar_editor {
+        use super::minimap_radar_editor::{press, ResultAction};
+        match press(editor, screen, button) {
+            ResultAction::Close => state.radar_editor = None,
+            ResultAction::Saved => {
+                state.map_settings_change = Some(("use_xaero_radar".to_owned(), "true".to_owned()));
+                state.xaero_radar_enabled = None;
+            }
+            ResultAction::Stay => {}
+        }
+        return;
+    }
     if !matches!(button,0|1) {return;}
     let panel=settings_panel(screen.rect[2],screen.rect[3]);
     let mouse=screen.mouse;
     if button==0 && inside(mouse,settings_back(panel)) {close_settings(state);return;}
+    if button == 0 && state.settings_tab == 3 && inside(mouse, settings_action(panel)) {
+        match super::minimap_radar_editor::Editor::open(
+            &game.native_data_dir(runtime::MOD_ID), state.xaero_profile.as_deref(),
+        ) {
+            Ok(editor) => state.radar_editor = Some(editor),
+            Err(error) => state.notice = Some((error.to_string(), Instant::now())),
+        }
+        return;
+    }
+    if button == 0 && state.settings_tab == 0 && inside(mouse, settings_action(panel)) {
+        let viewport = [screen.rect[2], screen.rect[3]];
+        let (settings, _, span) = placement_size(game, state, viewport);
+        use runtime::minimap::Corner::*;
+        let position = custom_minimap_position(game).unwrap_or(match settings.corner {
+            TopLeft => [0., 0.], TopRight => [1., 0.],
+            BottomLeft => [0., 1.], BottomRight => [1., 1.],
+        });
+        state.placement = Some(PlacementEdit { position, span });
+        return;
+    }
     if button==0 && let Some(i)=(0..SETTING_CATEGORIES).find(|i|inside(mouse,settings_tab(panel,*i))) {
         state.settings_tab=i;
         state.settings_scroll=0;
@@ -6367,29 +6799,56 @@ fn draw_map_tools(game: &Game<'_>, batch: &mut HudBatch, state: &State, mouse: [
         tr("Center on me","К игроку","Recentrer","Centrar","Zu mir"),
         tr("Settings","Настройки","Paramètres","Ajustes","Einstellungen"),
         tr("Export PNG","Экспорт PNG","Exporter PNG","Exportar PNG","PNG-Export"),
+        tr("Last death","Последняя смерть","Dernière mort","Última muerte","Letzter Tod"),
+        tr("Server worlds", "Миры сервера", "Mondes du serveur", "Mundos del servidor", "Serverwelten"),
     ];
-    for ((i, rect), label) in map_tools(batch.width).into_iter().enumerate().zip(labels) {
-        let active = i==0 && state.map_panel==MapPanel::Waypoints;
+    for ((i, rect), label) in map_tools(batch.width, state).enumerate().zip(labels) {
+        let active = i == 0 && state.map_panel == MapPanel::Waypoints
+            || i == 5 && (state.map_panel == MapPanel::ServerWorlds || state.world.starts_with("subworld:"));
         if active {
             game.native_fill(batch, [rect[0], rect[1] - 2., rect[2], 2.], 0xff62d0c2);
         }
-        button(game,batch,rect,&fit_text(game,label,rect[2]-6.),mouse,true);
+        button(game,batch,rect,&fit_text(game,label,rect[2]-6.),mouse,i != 4 || latest_death(state).is_some());
     }
     let panel = map_panel_rect(batch.width,batch.height);
     let title = match state.map_panel {
         MapPanel::None => return,
         MapPanel::Waypoints => labels[0],
+        MapPanel::ServerWorlds => labels[5],
     };
     game.native_fill(batch,panel,0xf5212e39);
     game.native_fill(batch,[panel[0],panel[1],2.,panel[3]],0xff62d0c2);
     game.map_text(batch,title,[panel[0]+7.,panel[1]+7.],0xffe6f0f4,true);
+    if state.map_panel == MapPanel::ServerWorlds {
+        draw_server_worlds(game, batch, state, panel, mouse);
+        return;
+    }
+    let [search, group, all, hidden] = map_panel_fields(panel);
+    game.native_fill(batch, search, if state.waypoint_search_focus {0xff355464} else {0xff253744});
+    let value = if state.waypoint_search.is_empty() {
+        tr("Search waypoints…","Поиск метки…","Rechercher un repère…","Buscar marcador…","Wegpunkt suchen…")
+    } else { &state.waypoint_search };
+    game.map_text(batch, &fit_text(game, value, search[2]-10.), [search[0]+5., search[1]+5.], 0xffeaf1f6, false);
+    let group_name = format!("{} ›", group_label(state.waypoint_group.as_deref()));
+    for (rect, label, active) in [
+        (group, group_name.as_str(), false),
+        (all, tr("All groups","Все группы","Tous les groupes","Todos los grupos","Alle Gruppen"),
+            game.map_option("all_waypoint_groups") == Some(1)),
+        (hidden, tr("Show disabled","Показать скрытые","Voir les repères inactifs","Ver desactivados","Inaktive anzeigen"),
+            state.map_panel_hidden),
+    ] {
+        button(game,batch,rect,&fit_text(game,label,rect[2]-6.),mouse,true);
+        if active { game.native_fill(batch,[rect[0],rect[1]+rect[3]-2.,rect[2],2.],0xff62d0c2); }
+    }
     let count = map_panel_rows(batch.height);
-    for (i, (_,waypoint)) in shown_waypoints(state).skip(state.map_panel_scroll).take(count).enumerate() {
+    let visible = visible_map_panel_waypoints(game, state, batch.height);
+    for (i, waypoint) in visible.iter().enumerate() {
         let row=map_panel_row(panel,i);
         game.native_fill(batch,row,if inside(mouse,row) {0xff395469} else {0xff293c4e});
         game.native_fill(batch,[row[0]+4.,row[1]+5.,8.,8.],waypoint_argb(waypoint.color));
         let name=fit_text(game,&waypoint.name,row[2]-20.);
-        game.map_text(batch,&name,[row[0]+17.,row[1]+5.],0xffeef5f8,true);
+        game.map_text(batch,&name,[row[0]+17.,row[1]+5.],
+            if waypoint.options.disabled {0xff9daab4} else {0xffeef5f8},true);
         if inside(mouse,row)
             && let Some(frame) = state.frame.as_ref().filter(|f| f.view.large && f.view.dimension == waypoint.dimension)
         {
@@ -6401,22 +6860,72 @@ fn draw_map_tools(game: &Game<'_>, batch: &mut HudBatch, state: &State, mouse: [
             }
         }
     }
-    if shown_waypoints(state).next().is_none() {
-        game.map_text(batch,tr("No waypoints","Нет меток","Aucun repère","Sin marcadores","Keine Wegpunkte"),
-            [panel[0]+8.,panel[1]+29.],0xffb4c6d2,true);
+    if visible.is_empty() {
+        game.map_text(batch,tr("No matching waypoints","Нет подходящих меток","Aucun repère trouvé",
+            "No hay marcadores coincidentes","Keine passenden Wegpunkte"),
+            [panel[0]+8.,panel[1]+83.],0xffb4c6d2,true);
     }
     let row = map_panel_row(panel,count);
     button(game,batch,row,tr("Manage waypoints…","Управление метками…","Gérer les repères…","Gestionar marcadores…","Wegpunkte verwalten…"),mouse,true);
 }
 
+fn server_world_rows(names: &BTreeSet<String>, skip: usize, take: usize) -> impl Iterator<Item = Option<&str>> {
+    std::iter::once(None).chain(names.iter().map(|name| Some(name.as_str()))).skip(skip).take(take)
+}
+
+fn draw_server_worlds(game: &Game<'_>, batch: &mut HudBatch, state: &State, panel: [f32; 4], mouse: [f32; 2]) {
+    let (names, active) = runtime::initialize(game.native_data_dir(runtime::MOD_ID)).server_worlds(&state.base_world);
+    let [name_field, create, _, _] = map_panel_fields(panel);
+    let prompt = tr("New world name…", "Имя нового мира…", "Nom du nouveau monde…", "Nombre del nuevo mundo…", "Neuer Weltname…");
+    let name = if state.server_world_name.is_empty() { prompt } else { &state.server_world_name };
+    game.native_fill(batch, name_field, if state.server_world_focus { 0xff355464 } else { 0xff253744 });
+    game.map_text(batch, &fit_text(game, name, name_field[2] - 10.), [name_field[0] + 5., name_field[1] + 5.], 0xffeaf1f6, false);
+    button(game, batch, create, tr("Create", "Создать", "Créer", "Crear", "Anlegen"), mouse, !state.server_world_name.trim().is_empty());
+    let default_label = tr("Default", "По умолчанию", "Par défaut", "Predeterminado", "Standard");
+    for (i, name) in server_world_rows(&names, state.map_panel_scroll, map_panel_rows(batch.height)).enumerate() {
+        let row = map_panel_row(panel, i);
+        let active = name == active.as_deref();
+        let text = fit_text(game, name.unwrap_or(default_label), row[2] - 14.);
+        button(game, batch, row, &text, mouse, true);
+        if active { game.native_fill(batch, [row[0], row[1], 3., row[3]], 0xff62d0c2); }
+    }
+}
+
+fn select_map_server_world(game: &Game<'_>, state: &mut State, name: Option<&str>) {
+    let controller = runtime::initialize(game.native_data_dir(runtime::MOD_ID));
+    if controller.select_server_world(&state.base_world, name, state.server_world_signal.as_ref()) {
+        state.server_world_focus = false;
+        state.server_world_name.clear();
+        runtime::set_text_input(false);
+    } else {
+        state.notice = Some((tr("Could not select server world", "Не удалось выбрать мир сервера",
+            "Impossible de choisir le monde du serveur", "No se pudo seleccionar el mundo del servidor",
+            "Serverwelt konnte nicht gewählt werden").into(), Instant::now()));
+    }
+}
+
+fn create_map_server_world(game: &Game<'_>, state: &mut State) {
+    let name = state.server_world_name.trim().to_owned();
+    if !name.is_empty() {
+        select_map_server_world(game, state, Some(&name));
+    }
+}
+
 fn map_tools_press(game: &Game<'_>, state: &mut State, screen: &mod_api::ScreenView<'_>, button: i32) -> bool {
     let [w,h] = [screen.rect[2],screen.rect[3]];
     let mouse = screen.mouse;
-    if let Some(i) = map_tools(w).into_iter().position(|rect| inside(mouse,rect)) {
+    if let Some(i) = map_tools(w, state).position(|rect| inside(mouse,rect)) {
         state.dragging = false;
         if button != 0 { return true; }
+        state.server_world_focus = false;
+        runtime::set_text_input(false);
         match i {
-            0 => { state.map_panel.toggle(MapPanel::Waypoints); state.map_panel_scroll = 0; }
+            0 => {
+                state.map_panel.toggle(MapPanel::Waypoints);
+                state.map_panel_scroll = 0;
+                state.waypoint_search_focus = false;
+                runtime::set_text_input(false);
+            }
             1 => {
                 if let Some(player) = game.native_player() {
                     let dimension = Dimension::from_id(player.dimension);
@@ -6426,30 +6935,72 @@ fn map_tools_press(game: &Game<'_>, state: &mut State, screen: &mod_api::ScreenV
             }
             2 => open_settings(state,Some(Mode::Map),1),
             3 => export_map_png(game,state,state.selected),
+            4 => {
+                if let Some(key) = latest_death(state).map(Waypoint::key)
+                    && let Some(dimension) = focus_waypoint(state, key)
+                {
+                    runtime::initialize(game.native_data_dir(runtime::MOD_ID)).choose_dimension(true, dimension);
+                }
+            }
+            5 => {
+                state.map_panel.toggle(MapPanel::ServerWorlds);
+                state.waypoint_search_focus = false;
+                state.map_panel_scroll = 0;
+            }
             _ => {}
         }
         return true;
     }
     if state.map_panel == MapPanel::None { return false; }
     let panel = map_panel_rect(w,h);
-    if !inside(mouse,panel) { return false; }
-    state.dragging=false;
-    if button != 0 { return true; }
-        let n = map_panel_rows(h);
-        if inside(mouse,map_panel_row(panel,n)) {
-            state.map_panel=MapPanel::None;
-            state.mode=Mode::Waypoints;
-            state.waypoint_scroll=0;
-        } else {
-            let key = shown_waypoints(state).skip(state.map_panel_scroll).take(n).enumerate()
-                .find_map(|(i,(_,point))| inside(mouse,map_panel_row(panel,i)).then(||point.key()));
-            if let Some(key) = key {
-                state.waypoint_selected=Some(key);
-                if let Some(dimension) = show_selected_waypoint(state) {
-                    runtime::initialize(game.native_data_dir(runtime::MOD_ID)).choose_dimension(true,dimension);
+    if state.map_panel == MapPanel::ServerWorlds {
+        let [name_field, create, _, _] = map_panel_fields(panel);
+        state.server_world_focus = button == 0 && inside(mouse, name_field);
+        runtime::set_text_input(state.server_world_focus);
+        if !inside(mouse, panel) { return false; }
+        state.dragging = false;
+        if button == 0 {
+            if inside(mouse, create) {
+                create_map_server_world(game, state);
+            } else {
+                let (names, _) = runtime::initialize(game.native_data_dir(runtime::MOD_ID)).server_worlds(&state.base_world);
+                for (i, name) in server_world_rows(&names, state.map_panel_scroll, map_panel_rows(h)).enumerate() {
+                    if inside(mouse, map_panel_row(panel, i)) {
+                        select_map_server_world(game, state, name);
+                        break;
+                    }
                 }
             }
         }
+        return true;
+    }
+    let [search, group, all, hidden] = map_panel_fields(panel);
+    state.waypoint_search_focus = button == 0 && inside(mouse, search);
+    runtime::set_text_input(state.waypoint_search_focus);
+    if !inside(mouse,panel) { return false; }
+    state.dragging = false;
+    if button != 0 || state.waypoint_search_focus { return true; }
+    if inside(mouse, group) {
+        next_waypoint_group(game, state);
+    } else if inside(mouse, all) {
+        let enabled = game.map_option("all_waypoint_groups") != Some(1);
+        state.map_settings_change = Some(("all_waypoint_groups".to_owned(), enabled.to_string()));
+        state.map_panel_scroll = 0;
+    } else if inside(mouse, hidden) {
+        state.map_panel_hidden = !state.map_panel_hidden;
+        state.map_panel_scroll = 0;
+    } else if inside(mouse, map_panel_row(panel, map_panel_rows(h))) {
+        state.map_panel = MapPanel::None;
+        state.mode = Mode::Waypoints;
+        state.waypoint_scroll = 0;
+        state.waypoint_bulk = None;
+    } else {
+        let key = visible_map_panel_waypoints(game, state, h).iter().enumerate()
+            .find_map(|(i, point)| inside(mouse, map_panel_row(panel, i)).then(|| point.key()));
+        if let Some(key) = key && let Some(dimension) = focus_waypoint(state, key) {
+            runtime::initialize(game.native_data_dir(runtime::MOD_ID)).choose_dimension(true, dimension);
+        }
+    }
     true
 }
 
@@ -6474,7 +7025,7 @@ fn map_zoom(game:&Game<'_>,state:&mut State,step:f64,offset:[f64;2]) {
 
 fn over_map_controls(game:&Game<'_>,state:&State,mouse: [f32; 2], width: f32, height: f32) -> bool {
     inside(mouse, cache_map_button(width))
-        || map_tools(width).into_iter().any(|rect| inside(mouse, rect))
+        || map_tools(width, state).any(|rect| inside(mouse, rect))
         || state.map_panel != MapPanel::None && inside(mouse, map_panel_rect(width, height))
         || inside(mouse, map_footer(width, height))
         || (0..4).any(|i| inside(mouse, tab(width, i)))
@@ -6827,18 +7378,19 @@ fn refresh_cache_catalog(game: &Game<'_>) {
                         row.icon = cache_icon(&bytes);
                     }
                 }
-            } else if let Some(address) = world.strip_prefix("server:")
-                && let Some(server) = servers.iter().find(|s| s.ip == address)
-            {
-                if !server.name.is_empty() {
-                    row.name = server.name.clone();
+            } else {
+                let scoped = runtime::server_subworld_parts(world);
+                let address = scoped.as_ref().and_then(|(base, _)| base.strip_prefix("server:"))
+                    .or_else(|| world.strip_prefix("server:"));
+                if let Some(address) = address {
+                    let server = servers.iter().find(|s| s.ip == address);
+                    let title = server.map(|s| s.name.as_str()).filter(|s| !s.is_empty()).unwrap_or(address);
+                    row.name = scoped.as_ref().map_or_else(|| title.to_owned(), |(_, name)| format!("{title} / {name}"));
+                    row.icon = server.and_then(|s| s.icon.as_deref())
+                        .filter(|s| s.len() <= 1400000)
+                        .and_then(horizon_client::skins::base64_decode)
+                        .and_then(|png| cache_icon(&png));
                 }
-                row.icon = server
-                    .icon
-                    .as_deref()
-                    .filter(|s| s.len() <= 1400000)
-                    .and_then(horizon_client::skins::base64_decode)
-                    .and_then(|png| cache_icon(&png));
             }
         }
         Ok(())
@@ -7007,6 +7559,7 @@ fn draw_cache_screen(game: &Game<'_>, batch: &mut HudBatch, state: &State) {
                 0xff232c35
             },
         );
+        let server = entry.world.as_deref().is_some_and(|world| world.starts_with("server:") || world.starts_with("subworld:"));
         if let Some(icon) = state.caches.icons.get(&entry.file) {
             let x = f64::from(row[0] + 6.);
             let y = f64::from(row[1] + 6.);
@@ -7024,21 +7577,12 @@ fn draw_cache_screen(game: &Game<'_>, batch: &mut HudBatch, state: &State) {
             game.native_fill(batch, [row[0] + 6., row[1] + 6., 32., 32.], 0xff506846);
             game.map_text(
                 batch,
-                if entry
-                    .world
-                    .as_ref()
-                    .is_some_and(|w| w.starts_with("server:"))
-                {
-                    "S"
-                } else {
-                    "W"
-                },
+                if server { "S" } else { "W" },
                 [row[0] + 18., row[1] + 18.],
                 0xffffff,
                 true,
             );
         }
-        let server = entry.world.as_deref().is_some_and(|world| world.starts_with("server:"));
         let mask = game.map_option("hide_world_names").unwrap_or(0);
         let hidden = mask >= 2 || (mask == 1 && server);
         let label = if hidden {
@@ -7607,6 +8151,25 @@ fn create_waypoint_here(game: &Game<'_>, state: &mut State) {
     runtime::set_text_input(true);
 }
 
+fn bulk_three_d_value(state: &State) -> bool {
+    state.waypoint_bulk.as_ref().is_some_and(|keys| state.waypoints.iter()
+        .any(|point| keys.contains(&point.key()) && (!point.show_3d || point.map_only())))
+}
+
+fn toggle_waypoint_bulk(state: &mut State) {
+    state.waypoint_confirm_delete = false;
+    state.waypoint_bulk = if state.waypoint_bulk.is_some() {
+        None
+    } else {
+        Some(state.waypoint_selected.into_iter().collect())
+    };
+}
+
+fn select_waypoint_results(game: &Game<'_>, state: &mut State) {
+    state.waypoint_bulk = Some(listed_waypoints(game, state).into_iter().map(|(_, point)| point.key()).collect());
+    state.waypoint_confirm_delete = false;
+}
+
 fn waypoint_press(
     game: &Game<'_>,
     state: &mut State,
@@ -7624,20 +8187,47 @@ fn waypoint_press(
     let [group_rect, create_group, rename_group, remove_group]=waypoint_group_buttons(w);
     if state.waypoint_groups_open {
         state.waypoint_groups_open=false;
-        if inside(screen.mouse,group_rect) { *canceled=true;return; }
-        let groups=waypoint_groups(game,state);
+        let groups=waypoint_group_choices(game,state);
+        let move_group = std::mem::take(&mut state.waypoint_group_move);
+        if inside(screen.mouse,group_rect) && !move_group { *canceled=true;return; }
         let count=visible_group_rows(h);
         let start=state.waypoint_groups_scroll.min(groups.len().saturating_sub(count));
         if let Some((_,group))=groups.into_iter().skip(start).take(count).enumerate()
             .find(|(i,_)|inside(screen.mouse,group_row(w,*i)))
         {
-            state.waypoint_group=group;
-            state.waypoint_scroll=0;
-            state.waypoint_selected=None;
-            controller.select_waypoint_group(&state.world,state.waypoint_group.as_deref());
+            if move_group {
+                if let Some(group) = group { edit_waypoint_batch(game, state, runtime::WaypointBatch::Move(&group)); }
+            } else {
+                change_waypoint_group(game, state, group);
+            }
             *canceled=true;
             return;
         }
+    }
+    let [rename, delete, show, share, paste, chat] = waypoint_actions(w, h);
+    if !inside(screen.mouse, delete) { state.waypoint_confirm_delete = false; }
+    if let Some(index) = waypoint_bulk_actions(w,h).iter().position(|rect| inside(screen.mouse,*rect))
+        && (index == 0 || state.waypoint_bulk.is_some())
+    {
+        let count = state.waypoint_bulk.as_ref().map_or(0, BTreeSet::len);
+        match index {
+            0 => toggle_waypoint_bulk(state),
+            1 => select_waypoint_results(game, state),
+            2 if count > 0 => {
+                state.waypoint_group_move = true;
+                state.waypoint_groups_open = true;
+                state.waypoint_groups_scroll = 0;
+            }
+            3 if count > 0 => edit_waypoint_batch(game, state, runtime::WaypointBatch::Visible(true)),
+            4 if count > 0 => edit_waypoint_batch(game, state, runtime::WaypointBatch::Visible(false)),
+            5 if count > 0 => {
+                let enabled = bulk_three_d_value(state);
+                edit_waypoint_batch(game, state, runtime::WaypointBatch::ThreeD(enabled));
+            }
+            _ => {}
+        }
+        *canceled = true;
+        return;
     }
     let [search,dimension,sort]=waypoint_filters(w);
     state.waypoint_search_focus=inside(screen.mouse,search);
@@ -7649,8 +8239,7 @@ fn waypoint_press(
     if inside(screen.mouse,dimension) {
         let i=Dimension::ALL.iter().position(|d|*d==state.waypoint_dimension).unwrap_or(0);
         state.waypoint_dimension=Dimension::ALL[(i+1)%Dimension::ALL.len()];
-        state.waypoint_scroll=0;
-        state.waypoint_selected=None;
+        waypoint_search_changed(state);
         *canceled=true;
         return;
     }
@@ -7701,9 +8290,7 @@ fn waypoint_press(
     if inside(screen.mouse,remove_group) && let Some(name)=named
         && controller.remove_empty_waypoint_group(&state.world,name)
     {
-        state.waypoint_group = None;
-        state.waypoint_scroll = 0;
-        state.waypoint_selected = None;
+        change_waypoint_group(game, state, None);
         *canceled=true;
         return;
     }
@@ -7712,7 +8299,23 @@ fn waypoint_press(
     });
     if let Some((row, key)) = hit {
         let toggle = waypoint_3d_rect(row);
-        if inside(screen.mouse, toggle) {
+        let add = game.modifiers.control_key() || game.modifiers.super_key();
+        let range = game.modifiers.shift_key();
+        if state.waypoint_bulk.is_some() || add || range {
+            let mut keys = state.waypoint_bulk.take().unwrap_or_else(||
+                state.waypoint_selected.into_iter().collect());
+            if range {
+                let rows = listed_waypoints(game, state);
+                if let Some(end) = rows.iter().position(|(_, point)| point.key() == key) {
+                    let start = rows.iter().position(|(_, point)| Some(point.key()) == state.waypoint_selected).unwrap_or(end);
+                    keys.extend(rows[start.min(end)..=start.max(end)].iter().map(|(_, point)| point.key()));
+                }
+            } else if !keys.remove(&key) {
+                keys.insert(key);
+            }
+            state.waypoint_bulk = Some(keys);
+            state.waypoint_selected = Some(key);
+        } else if inside(screen.mouse, toggle) {
             controller.change_waypoint(&state.world, key, |point| {
                 if point.map_only() {
                     point.options.visibility %= 2;
@@ -7721,6 +8324,8 @@ fn waypoint_press(
                     point.show_3d = !point.show_3d;
                 }
             });
+        } else if inside(screen.mouse, waypoint_scope_rect(row)) {
+            controller.change_waypoint(&state.world, key, |point| point.options.visibility ^= 1);
         } else if inside(screen.mouse, [toggle[0]-24.0, toggle[1], 20.0, 18.0]) {
             controller.change_waypoint(&state.world, key, |point| point.options.disabled = !point.options.disabled);
         } else {
@@ -7729,7 +8334,19 @@ fn waypoint_press(
         *canceled = true;
         return;
     }
-    let [rename, delete, show, share, paste] = waypoint_actions(screen.rect[2], screen.rect[3]);
+    if inside(screen.mouse, chat) && let Some(link) = selected_waypoint(state).map(Waypoint::share_link) {
+        if link.encode_utf16().count() <= 256 {
+            state.pending_chat = Some((state.world.clone(), link));
+        } else {
+            state.notice = Some((tr("This link is too long for the chat. Use Copy link.",
+                "Ссылка слишком длинная для чата. Используй «Копировать».",
+                "Ce lien est trop long pour le chat. Utilisez Copier le lien.",
+                "El enlace es demasiado largo para el chat. Usa Copiar enlace.",
+                "Der Link ist zu lang für den Chat. Verwende Link kopieren.").to_owned(), Instant::now()));
+        }
+        *canceled = true;
+        return;
+    }
     if inside(screen.mouse, share) && let Some(point) = selected_waypoint(state) {
         state.pending_copy = Some(point.share_link());
         state.notice = Some((tr(
@@ -7764,7 +8381,19 @@ fn waypoint_press(
     if inside(screen.mouse, rename)
         && let Some(key) = selected_waypoint(state).map(Waypoint::key)
     {
+        state.waypoint_bulk = None;
         edit_waypoint(state,key);
+        *canceled = true;
+        return;
+    }
+    if inside(screen.mouse, delete) && let Some(keys) = &state.waypoint_bulk {
+        if !keys.is_empty() {
+            if state.waypoint_confirm_delete {
+                edit_waypoint_batch(game, state, runtime::WaypointBatch::Delete);
+            } else {
+                state.waypoint_confirm_delete = true;
+            }
+        }
         *canceled = true;
         return;
     }
@@ -7853,10 +8482,7 @@ fn save_name(game: &Game<'_>, state: &mut State) {
             GroupEdit::Rename(old) => controller.rename_waypoint_group(&state.world,&old,name),
         };
         if saved {
-            controller.select_waypoint_group(&state.world,Some(name));
-            state.waypoint_group = Some(name.to_owned());
-            state.waypoint_scroll = 0;
-            state.waypoint_selected = None;
+            change_waypoint_group(game, state, Some(name.to_owned()));
         }
         state.notice = Some((if saved {
             tr("Group saved","Группа сохранена","Groupe enregistré","Grupo guardado","Gruppe gespeichert")
@@ -7948,6 +8574,11 @@ pub(super) fn drag(game: &Game<'_>, delta: [f32; 2], button: i32, canceled: &mut
         *canceled = true;
         return;
     }
+    if let Some(edit) = &mut state.placement {
+        edit.move_by(delta);
+        *canceled = true;
+        return;
+    }
     if state.mode != Mode::Map || !state.dragging {
         return;
     }
@@ -7967,6 +8598,11 @@ pub(super) fn scroll(
     }
     let mut state = state();
     if state.mode == Mode::Settings {
+        if let Some(editor) = &mut state.radar_editor {
+            editor.scroll([screen.rect[2], screen.rect[3]], scroll[1]);
+            *canceled = true;
+            return;
+        }
         let panel=settings_panel(screen.rect[2],screen.rect[3]);
         let max=settings_catalog(game,state.settings_tab).count().saturating_sub(settings_rows(panel));
         state.settings_scroll=(state.settings_scroll as i64-scroll[1] as i64).clamp(0,max as i64) as usize;
@@ -7998,7 +8634,7 @@ pub(super) fn scroll(
     }
     if state.mode == Mode::Waypoints {
         if state.waypoint_groups_open {
-            let groups=waypoint_groups(game,&state).len().saturating_sub(visible_group_rows(screen.rect[3]));
+            let groups=waypoint_group_choices(game,&state).len().saturating_sub(visible_group_rows(screen.rect[3]));
             state.waypoint_groups_scroll=(state.waypoint_groups_scroll as i64-scroll[1] as i64).clamp(0,groups as i64) as usize;
             *canceled=true;
             return;
@@ -8012,9 +8648,15 @@ pub(super) fn scroll(
     if state.mode != Mode::Map {
         return;
     }
-    if state.map_panel == MapPanel::Waypoints
+    if state.map_panel != MapPanel::None
         && inside(screen.mouse,map_panel_rect(screen.rect[2],screen.rect[3])) {
-        let max = shown_waypoints(&state).count().saturating_sub(map_panel_rows(screen.rect[3]));
+        let count = if state.map_panel == MapPanel::ServerWorlds {
+            let controller = runtime::initialize(game.native_data_dir(runtime::MOD_ID));
+            1 + controller.server_worlds(&state.base_world).0.len()
+        } else {
+            map_panel_waypoints(game, &state).len()
+        };
+        let max = count.saturating_sub(map_panel_rows(screen.rect[3]));
         state.map_panel_scroll = (state.map_panel_scroll as i64 - scroll[1] as i64).clamp(0,max as i64) as usize;
         *canceled = true;
         return;
@@ -8035,11 +8677,32 @@ pub(super) fn scroll(
     *canceled = true;
 }
 
-pub(super) fn screen_key(game: &Game<'_>, key: &str, canceled: &mut bool) {
+pub(super) fn screen_key(game: &Game<'_>, key: &str, modifiers: u32, canceled: &mut bool) {
     if game.mod_screen() != Some(runtime::MOD_ID) || !game.map_on(runtime::MOD_ID) {
         return;
     }
     let mut state = state();
+    if state.mode == Mode::Map && state.map_panel == MapPanel::ServerWorlds && state.server_world_focus {
+        match key {
+            "key.keyboard.escape" => {
+                state.server_world_focus = false;
+                runtime::set_text_input(false);
+            }
+            "key.keyboard.backspace" => { state.server_world_name.pop(); }
+            "key.keyboard.enter" | "key.keyboard.keypad.enter" => create_map_server_world(game, &mut state),
+            "key.keyboard.a" if modifiers & 10 != 0 => state.server_world_name.clear(),
+            "key.keyboard.v" if modifiers & 10 != 0 => {
+                let text = game.clipboard.text();
+                for c in text.chars().filter(|c| !c.is_control()) {
+                    if state.server_world_name.len() + c.len_utf8() > runtime::SERVER_WORLD_NAME_LIMIT { break; }
+                    state.server_world_name.push(c);
+                }
+            }
+            _ => {}
+        }
+        *canceled = true;
+        return;
+    }
     if state.info.is_some() {
         if key == "key.keyboard.escape" {
             state.info = None;
@@ -8048,11 +8711,26 @@ pub(super) fn screen_key(game: &Game<'_>, key: &str, canceled: &mut bool) {
         return;
     }
     if state.mode == Mode::Settings {
-        if key == "key.keyboard.escape" { close_settings(&mut state); }
+        if let Some(editor) = &mut state.radar_editor {
+            if editor.key(game, key, modifiers) { state.radar_editor = None; }
+        } else if let Some(edit) = &mut state.placement {
+            match key {
+                "key.keyboard.left" => edit.move_by([-1., 0.]),
+                "key.keyboard.right" => edit.move_by([1., 0.]),
+                "key.keyboard.up" => edit.move_by([0., -1.]),
+                "key.keyboard.down" => edit.move_by([0., 1.]),
+                "key.keyboard.enter" | "key.keyboard.keypad.enter" => {
+                    state.placement_change = Some(Some(edit.position));
+                    state.placement = None;
+                }
+                "key.keyboard.escape" => state.placement = None,
+                _ => {}
+            }
+        } else if key == "key.keyboard.escape" { close_settings(&mut state); }
         *canceled=true;
         return;
     }
-    if state.mode == Mode::Waypoints && state.waypoint_search_focus {
+    if matches!(state.mode, Mode::Waypoints | Mode::Map) && state.waypoint_search_focus {
         match key {
             "key.keyboard.escape" | "key.keyboard.enter" | "key.keyboard.keypad.enter" => {
                 state.waypoint_search_focus=false;
@@ -8060,8 +8738,19 @@ pub(super) fn screen_key(game: &Game<'_>, key: &str, canceled: &mut bool) {
             }
             "key.keyboard.backspace" => {
                 state.waypoint_search.pop();
-                state.waypoint_scroll=0;
-                state.waypoint_selected=None;
+                waypoint_search_changed(&mut state);
+            }
+            "key.keyboard.a" if modifiers & 10 != 0 => {
+                state.waypoint_search.clear();
+                waypoint_search_changed(&mut state);
+            }
+            "key.keyboard.v" if modifiers & 10 != 0 => {
+                let text = game.clipboard.text();
+                for ch in text.chars().filter(|c| !c.is_control()) {
+                    if state.waypoint_search.len() + ch.len_utf8() > 128 { break; }
+                    state.waypoint_search.push(ch);
+                }
+                waypoint_search_changed(&mut state);
             }
             _=>{}
         }
@@ -8070,7 +8759,19 @@ pub(super) fn screen_key(game: &Game<'_>, key: &str, canceled: &mut bool) {
     }
     if state.mode == Mode::Waypoints && state.waypoint_groups_open && key=="key.keyboard.escape" {
         state.waypoint_groups_open=false;
+        state.waypoint_group_move=false;
         *canceled=true;
+        return;
+    }
+    if state.mode == Mode::Waypoints && key == "key.keyboard.a" && modifiers & 10 != 0 {
+        select_waypoint_results(game, &mut state);
+        *canceled = true;
+        return;
+    }
+    if state.mode == Mode::Waypoints && key == "key.keyboard.escape" && state.waypoint_bulk.is_some() {
+        state.waypoint_bulk = None;
+        state.waypoint_confirm_delete = false;
+        *canceled = true;
         return;
     }
     if state.mode==Mode::Waypoints && matches!(key,"key.keyboard.up"|"key.keyboard.down") {
@@ -8120,6 +8821,9 @@ pub(super) fn screen_key(game: &Game<'_>, key: &str, canceled: &mut bool) {
     if key == "key.keyboard.escape" {
         if state.map_panel != MapPanel::None && state.mode == Mode::Map {
             state.map_panel = MapPanel::None;
+            state.waypoint_search_focus = false;
+            state.server_world_focus = false;
+            runtime::set_text_input(false);
             *canceled = true;
             return;
         }
@@ -8134,11 +8838,22 @@ pub(super) fn screen_char(game: &Game<'_>, c: char, canceled: &mut bool) {
         return;
     }
     let mut state = state();
-    if state.mode == Mode::Waypoints && state.waypoint_search_focus {
+    if state.mode == Mode::Map && state.map_panel == MapPanel::ServerWorlds && state.server_world_focus {
+        if !c.is_control() && state.server_world_name.len() + c.len_utf8() <= runtime::SERVER_WORLD_NAME_LIMIT {
+            state.server_world_name.push(c);
+        }
+        *canceled = true;
+        return;
+    }
+    if let Some(editor) = &mut state.radar_editor {
+        editor.character(c);
+        *canceled = true;
+        return;
+    }
+    if matches!(state.mode, Mode::Waypoints | Mode::Map) && state.waypoint_search_focus {
         if !c.is_control() && state.waypoint_search.len()+c.len_utf8()<=128 {
             state.waypoint_search.push(c);
-            state.waypoint_scroll=0;
-            state.waypoint_selected=None;
+            waypoint_search_changed(&mut state);
         }
         *canceled=true;
         return;
@@ -8163,6 +8878,10 @@ pub(super) fn disconnect(game: &Game<'_>) {
     if !game.native_window() {
         return;
     }
+    let pending = DEATH_CAPTURE.lock().unwrap_or_else(|error| error.into_inner()).disconnect();
+    if let Some((world, location)) = pending && game.map_on(runtime::MOD_ID) {
+        record_death(game, &world, location);
+    }
     runtime::set_text_input(false);
     QUICK_MINIMAP.store(0,std::sync::atomic::Ordering::Relaxed);
     LOCATOR_WAYPOINTS.lock().unwrap_or_else(|error| error.into_inner()).clear();
@@ -8181,4 +8900,5 @@ pub(super) fn disconnect(game: &Game<'_>) {
 pub(super) fn atlas_invalidated() {
     state().frame = None;
     state().page_images.clear();
+    super::minimap_radar_icons::invalidate();
 }

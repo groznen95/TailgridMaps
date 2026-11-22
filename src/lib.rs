@@ -122,6 +122,7 @@ impl Hooks for Mod {
             ("waypoint_cross_dimension",true),
             ("waypoint_partial_y",true),
             ("quick_minimap_centered",false),
+            ("minimap_position_custom",false),
             ("quick_minimap_toggle",false),
             ("map_teleport_allowed",true),
             ("map_partial_y",true),
@@ -233,6 +234,8 @@ impl Hooks for Mod {
             ("waypoint_min_distance", 0., 4096., 1., 0.),
             ("waypoint_max_distance", 0., 30_000_000., 1., 0.),
             ("quick_minimap_zoom", 0., 6., 1., 0.),
+            ("minimap_position_x", 0., 10000., 1., 10000.),
+            ("minimap_position_y", 0., 10000., 1., 0.),
             ("minimap_cave_zoom", 1., 4., 1., 1.),
             ("minimap_exact_size", 0., 250., 1., 0.),
             ("minimap_claim_fill", 1., 100., 1., 46.),
@@ -288,8 +291,11 @@ impl Hooks for Mod {
             (runtime::WORLD_MAP_KEY, runtime::WORLD_MAP_DEFAULT),
             (runtime::WAYPOINTS_KEY, runtime::WAYPOINTS_DEFAULT),
             ("quick_minimap", "key.keyboard.z"),
+            ("minimap_zoom_in", "key.keyboard.i"),
+            ("minimap_zoom_out", "key.keyboard.o"),
             ("slime_map", "key.keyboard.unknown"),
-            ("create_waypoint", "key.keyboard.b"),
+            ("create_waypoint", "key.keyboard.k"),
+            ("next_waypoint_group", "key.keyboard.g"),
             ("map_settings", "key.keyboard.y"),
         ] {
             r.register_key_mapping(
@@ -345,15 +351,40 @@ impl Hooks for Mod {
 
     fn register_client_commands(&self, _: &mut dyn ClientHost, event: &mut RegisterClientCommandsEvent<'_>) {
         event.commands.push(Command::new("horizon_map_accept <waypoint:text>"));
+        event.commands.push(Command::new("deaths"));
     }
 
     fn command(&self, host: &mut dyn ClientHost, event: &mut CommandEvent<'_>) -> Flow {
+        if event.command == "deaths" {
+            let world = host.client_session().client_server().and_then(|server| {
+                if server.integrated_local {
+                    server.save_folder.and_then(|folder| runtime::waypoint_world(true, &folder))
+                } else {
+                    server.address.and_then(|address| runtime::waypoint_world(false, &address)).map(runtime::active_world)
+                }
+            });
+            let points = world.as_deref().map_or_else(Vec::new, runtime::death_history);
+            let heading = if points.is_empty() {
+                runtime::tr("No death points in this world.", "В этом мире пока нет точек смерти.",
+                    "Aucune mort dans ce monde.", "No hay muertes en este mundo.", "Keine Todespunkte in dieser Welt.")
+            } else {
+                runtime::tr("Death points · newest first", "Точки смерти · сначала последняя",
+                    "Morts récentes", "Muertes recientes", "Letzte Todespunkte")
+            };
+            let _ = host.chat_line(Text::literal(heading));
+            for (index, point) in points.iter().enumerate() {
+                let _ = host.chat_line(Text::literal(format!(
+                    "{}. {} · X {}  Y {}  Z {}", index + 1, point.dimension.label(), point.x, point.y, point.z,
+                )));
+            }
+            return Flow::Cancel;
+        }
         let Some(link) = event.command.strip_prefix("horizon_map_accept ") else { return Flow::Continue };
         if let Some(server) = host.client_session().client_server() {
             let world = if server.integrated_local {
                 server.save_folder.and_then(|folder| runtime::waypoint_world(true,&folder))
             } else {
-                server.address.and_then(|address| runtime::waypoint_world(false,&address))
+                server.address.and_then(|address| runtime::waypoint_world(false,&address)).map(runtime::active_world)
             };
             let dimension = runtime::Dimension::from_id(host.dimension());
             if let Some(world) = world
@@ -489,3 +520,7 @@ mod minimap_map_regression_tests;
 mod minimap_maps_tests;
 #[cfg(test)]
 mod minimap_settings_tests;
+
+pub fn mod_icon() -> &'static [u8] {
+    include_bytes!("../icon.png")
+}

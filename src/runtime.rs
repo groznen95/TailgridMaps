@@ -17,7 +17,7 @@ use std::{
 };
 
 pub const MOD_ID: &str = "trailgrid_maps";
-pub const MOD_TITLE: &str = "trail";
+pub const MOD_TITLE: &str = "Kadir's Map";
 pub const WORLD_MAP_KEY: &str = "world_map";
 pub const WORLD_MAP_DEFAULT: &str = "key.keyboard.m";
 pub const WAYPOINTS_KEY: &str = "waypoints";
@@ -552,7 +552,7 @@ pub mod minimap {
                 overworld_coordinates: true,
                 nether_coordinates: true,
                 death_waypoints: true,
-                death_waypoint_auto_remove: true,
+                death_waypoint_auto_remove: false,
                 world_waypoints: true,
                 world_waypoint_style: WorldMarkerStyle::default(),
                 directions: false,
@@ -703,6 +703,11 @@ pub mod minimap {
         /// Ordered choices for the SDK settings page, relative to this mod's
         /// historical defaults. Actions and the RAM slider have no choices.
         pub fn options(button: usize) -> Vec<Self> {
+            // Keep the original SDK choice indices while defaulting new profiles to history.
+            if button == 12 {
+                let off = Self::default();
+                return vec![Self { death_waypoint_auto_remove: true, ..off }, off];
+            }
             if matches!(button, 6 | 18 | 19) || button >= super::SDK_SETTING_SLOTS {
                 return Vec::new();
             }
@@ -727,6 +732,21 @@ pub mod minimap {
             let mut selected = Self::default();
             selected.overlay(self, 1 << button);
             Self::options(button).iter().position(|v| *v == selected)
+        }
+
+        pub fn zoom_step(self, nearer: bool) -> Option<usize> {
+            let current = self.blocks_per_pixel;
+            let best = Self::options(4)
+                .into_iter()
+                .enumerate()
+                .filter(|(_, settings)| if nearer {
+                    settings.blocks_per_pixel < current
+                } else {
+                    settings.blocks_per_pixel > current
+                });
+            let distance = |settings: &Self| (settings.blocks_per_pixel - current).abs();
+            best.min_by(|a, b| distance(&a.1).total_cmp(&distance(&b.1)))
+                .map(|(index, _)| index)
         }
 
         pub fn select_option(&mut self, button: usize, index: usize) -> bool {
@@ -1936,10 +1956,59 @@ pub fn slime_seed(text: &str, world: &str) -> Option<i64> {
     })
 }
 fn valid_waypoint_world(world: &str) -> bool {
+    if world.starts_with("subworld:") {
+        return server_subworld_parts(world).is_some();
+    }
     world
         .strip_prefix("save:")
         .or_else(|| world.strip_prefix("server:"))
         .is_some_and(|id| !id.is_empty() && id.len() <= 1024 && !id.chars().any(char::is_control))
+}
+
+pub fn server_subworld_parts(world: &str) -> Option<(String, String)> {
+    if world.len() > 2048 { return None; }
+    let (server, name) = world.strip_prefix("subworld:")?.split_once(':')?;
+    let (base, label) = (unescape_name(server), unescape_name(name));
+    (base.starts_with("server:") && valid_waypoint_world(&base)
+        && valid_server_world_name(&label)
+        && escape_name(&base) == server && escape_name(&label) == name)
+        .then_some((base, label))
+}
+
+pub const SERVER_WORLD_NAME_LIMIT: usize = 80;
+const MAX_SERVER_WORLDS: usize = 64;
+const MAX_WORLD_SIGNALS: usize = MAX_SERVER_WORLDS * 8;
+
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct ServerWorldSignal {
+    level: String,
+    seed_hash: i64,
+}
+
+impl ServerWorldSignal {
+    pub fn new(level: &str, seed_hash: i64) -> Option<Self> {
+        let (namespace, path) = level.split_once(':')?;
+        let valid = |byte: u8| byte.is_ascii_lowercase() || byte.is_ascii_digit() || b"_.-".contains(&byte);
+        if level.len() > 255 || namespace.is_empty() || path.is_empty()
+            || !namespace.bytes().all(valid) || !path.bytes().all(|byte| valid(byte) || byte == b'/')
+        {
+            return None;
+        }
+        Some(Self { level: level.to_owned(), seed_hash })
+    }
+
+    fn vanilla_level(&self) -> bool {
+        matches!(self.level.as_str(), "minecraft:overworld" | "minecraft:the_nether" | "minecraft:the_end")
+    }
+}
+
+fn valid_server_world_name(name: &str) -> bool {
+    !name.is_empty() && name.trim() == name && name.len() <= SERVER_WORLD_NAME_LIMIT
+        && !name.chars().any(char::is_control)
+}
+
+fn server_subworld_id(base: &str, name: &str) -> String {
+    format!("subworld:{}:{}", escape_name(base), escape_name(name))
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -2063,6 +2132,14 @@ pub struct WaypointOptions {
     pub temporary: bool,
 }
 
+#[derive(Clone, Copy)]
+pub enum WaypointBatch<'a> {
+    Move(&'a str),
+    Visible(bool),
+    ThreeD(bool),
+    Delete,
+}
+
 static SHARED_WAYPOINT: Mutex<Option<Waypoint>> = Mutex::new(None);
 
 pub fn queue_shared_waypoint(point: Waypoint) {
@@ -2071,6 +2148,43 @@ pub fn queue_shared_waypoint(point: Waypoint) {
 
 pub fn take_shared_waypoint() -> Option<Waypoint> {
     SHARED_WAYPOINT.lock().unwrap_or_else(|error| error.into_inner()).take()
+}
+
+pub type DeathLocation = (Dimension, [i32; 3]);
+
+#[derive(Default)]
+pub struct DeathCapture {
+    reported: Option<DeathLocation>,
+    pending: Option<(String, DeathLocation)>,
+}
+
+impl DeathCapture {
+    pub const fn new() -> Self { Self { reported: None, pending: None } }
+
+    pub fn start(&mut self, reported: Option<DeathLocation>) {
+        self.reported = reported;
+        self.pending = None;
+    }
+
+    pub fn combat(&mut self, world: String, fallback: DeathLocation) {
+        self.pending = Some((world, fallback));
+    }
+
+    pub fn respawn(
+        &mut self, world: &str, reported: Option<DeathLocation>, can_be_death: bool, was_dead: bool,
+    ) -> Option<DeathLocation> {
+        let previous = self.reported;
+        if reported.is_some() { self.reported = reported; }
+        if let Some((captured_world, fallback)) = self.pending.take() {
+            return (captured_world == world).then_some(reported.unwrap_or(fallback));
+        }
+        reported.filter(|at| was_dead || (can_be_death && Some(*at) != previous))
+    }
+
+    pub fn disconnect(&mut self) -> Option<(String, DeathLocation)> {
+        self.reported = None;
+        self.pending.take()
+    }
 }
 
 /// Automatic death waypoints start black so their skull stands out.
@@ -2559,6 +2673,42 @@ struct State {
 struct WaypointGroups {
     named: BTreeMap<String,BTreeSet<String>>,
     active: BTreeMap<String,String>,
+    server_worlds: BTreeMap<String, ServerWorlds>,
+}
+
+#[derive(Clone, Default)]
+struct ServerWorlds {
+    names: BTreeSet<String>,
+    active: Option<String>,
+    signals: BTreeMap<ServerWorldSignal, Option<String>>,
+}
+
+impl ServerWorlds {
+    fn map_for_signal(&mut self, signal: &ServerWorldSignal) -> Option<String> {
+        if let Some(name) = self.signals.get(signal) {
+            return name.clone();
+        }
+        // The first observation binds to the existing map. Normal dimension
+        // changes can have distinct seeds even on an unmodified Horizon server.
+        if self.signals.is_empty()
+            || signal.vanilla_level() && !self.signals.keys().any(|known| known.level == signal.level)
+        {
+            return self.active.clone();
+        }
+        if self.names.len() >= MAX_SERVER_WORLDS {
+            return self.active.clone();
+        }
+        let label = &signal.level[..signal.level.len().min(48)];
+        let stem = format!("{label} [{:016x}]", signal.seed_hash);
+        let mut name = stem.clone();
+        let mut suffix = 2;
+        while self.names.contains(&name) {
+            name = format!("{stem} {suffix}");
+            suffix += 1;
+        }
+        self.names.insert(name.clone());
+        Some(name)
+    }
 }
 
 impl WaypointGroups {
@@ -2566,16 +2716,51 @@ impl WaypointGroups {
         let mut groups = Self::default();
         for line in text.lines() {
             let Some((key,value)) = line.split_once('=') else {continue};
-            if !matches!(key,"waypoint_group_v1"|"waypoint_active_group_v1") {continue;}
+            if key == "server_world_signal_v1" {
+                let fields: Vec<_> = value.splitn(4, ':').collect();
+                if let [base, level, hash, label] = fields.as_slice() {
+                    let base = unescape_name(base);
+                    let label = unescape_name(label);
+                    if base.starts_with("server:") && valid_waypoint_world(&base)
+                        && (label.is_empty() || valid_waypoint_world(&server_subworld_id(&base, &label)))
+                        && let Ok(hash) = u64::from_str_radix(hash, 16)
+                        && let Some(signal) = ServerWorldSignal::new(&unescape_name(level), hash as i64)
+                    {
+                        let worlds = groups.server_worlds.entry(base).or_default();
+                        if worlds.signals.len() < MAX_WORLD_SIGNALS {
+                            worlds.signals.insert(signal, (!label.is_empty()).then_some(label));
+                        }
+                    }
+                }
+                continue;
+            }
+            if !matches!(key, "waypoint_group_v1" | "waypoint_active_group_v1" | "server_world_v1" | "server_world_active_v1") { continue; }
             let Some((world,group)) = value.split_once(':') else {continue};
             let world = unescape_name(world);
             let group = unescape_name(group);
-            if !valid_waypoint_world(&world) || !valid_group(&group) {continue;}
-            if key=="waypoint_group_v1" {
-                groups.named.entry(world).or_default().insert(group);
-            } else {
-                groups.active.insert(world,group);
+            match key {
+                "waypoint_group_v1" if valid_waypoint_world(&world) && valid_group(&group) => {
+                    groups.named.entry(world).or_default().insert(group);
+                }
+                "waypoint_active_group_v1" if valid_waypoint_world(&world) && valid_group(&group) => {
+                    groups.active.insert(world, group);
+                }
+                "server_world_v1" | "server_world_active_v1"
+                    if valid_waypoint_world(&server_subworld_id(&world, &group)) =>
+                {
+                    let worlds = groups.server_worlds.entry(world).or_default();
+                    if worlds.names.len() < MAX_SERVER_WORLDS || worlds.names.contains(&group) {
+                        worlds.names.insert(group.clone());
+                        if key == "server_world_active_v1" {
+                            worlds.active = Some(group);
+                        }
+                    }
+                }
+                _ => {}
             }
+        }
+        for worlds in groups.server_worlds.values_mut() {
+            worlds.signals.retain(|_, name| name.as_ref().is_none_or(|name| worlds.names.contains(name)));
         }
         groups
     }
@@ -2589,6 +2774,17 @@ impl WaypointGroups {
         }
         for (world,name) in &self.active {
             let _ = writeln!(text,"waypoint_active_group_v1={}:{}",escape_name(world),escape_name(name));
+        }
+        for (world, worlds) in &self.server_worlds {
+            for name in &worlds.names {
+                let key = if worlds.active.as_ref() == Some(name) { "server_world_active_v1" } else { "server_world_v1" };
+                let _ = writeln!(text, "{key}={}:{}", escape_name(world), escape_name(name));
+            }
+            for (signal, name) in &worlds.signals {
+                let _ = writeln!(text, "server_world_signal_v1={}:{}:{:016x}:{}",
+                    escape_name(world), escape_name(&signal.level), signal.seed_hash,
+                    escape_name(name.as_deref().unwrap_or_default()));
+            }
         }
     }
 }
@@ -2809,6 +3005,77 @@ impl Controller {
         self.state.lock().unwrap_or_else(|error| error.into_inner()).groups.active.get(world).cloned()
     }
 
+    pub fn server_worlds(&self, base: &str) -> (BTreeSet<String>, Option<String>) {
+        let state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+        state.groups.server_worlds.get(base).map(|worlds| (worlds.names.clone(), worlds.active.clone())).unwrap_or_default()
+    }
+
+    pub fn settings_loaded(&self) -> bool {
+        self.state.lock().unwrap_or_else(|error| error.into_inner()).loaded
+    }
+
+    fn world_for_server(&self, base: String) -> String {
+        let state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+        state.groups.server_worlds.get(&base).and_then(|worlds| worlds.active.as_deref())
+            .map(|name| server_subworld_id(&base, name)).unwrap_or(base)
+    }
+
+    pub fn observe_server_world(&self, base: &str, signal: &ServerWorldSignal) -> bool {
+        if !base.starts_with("server:") || !valid_waypoint_world(base) {
+            return false;
+        }
+        let notify = self.notify.lock().unwrap_or_else(|error| error.into_inner());
+        let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+        let Some(notify) = notify.as_ref().filter(|_| state.loaded && state.error.is_none()) else { return false; };
+        let worlds = state.groups.server_worlds.entry(base.to_owned()).or_default();
+        if worlds.signals.len() >= MAX_WORLD_SIGNALS && !worlds.signals.contains_key(signal) {
+            return false;
+        }
+        let name = worlds.map_for_signal(signal);
+        let changed = worlds.signals.get(signal) != Some(&name) || worlds.active != name;
+        if changed {
+            worlds.signals.insert(signal.clone(), name.clone());
+            worlds.active = name;
+            state.revision += 1;
+            let _ = notify.try_send(());
+        }
+        true
+    }
+
+    pub fn select_server_world(&self, base: &str, name: Option<&str>, signal: Option<&ServerWorldSignal>) -> bool {
+        if !base.starts_with("server:") || !valid_waypoint_world(base)
+            || name.is_some_and(|name| !valid_waypoint_world(&server_subworld_id(base, name)))
+        {
+            return false;
+        }
+        let notify = self.notify.lock().unwrap_or_else(|error| error.into_inner());
+        let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+        let Some(notify) = notify.as_ref().filter(|_| state.loaded && state.error.is_none()) else { return false; };
+        let worlds = state.groups.server_worlds.entry(base.to_owned()).or_default();
+        if signal.is_some_and(|signal| worlds.signals.len() >= MAX_WORLD_SIGNALS && !worlds.signals.contains_key(signal)) {
+            return false;
+        }
+        if let Some(name) = name {
+            if worlds.names.len() >= MAX_SERVER_WORLDS && !worlds.names.contains(name) {
+                return false;
+            }
+            worlds.names.insert(name.to_owned());
+        }
+        let binding_changed = signal.is_some_and(|signal| {
+            if worlds.signals.get(signal).is_some_and(|bound| bound.as_deref() == name) {
+                return false;
+            }
+            worlds.signals.insert(signal.clone(), name.map(str::to_owned));
+            true
+        });
+        if binding_changed || worlds.active.as_deref() != name {
+            worlds.active = name.map(str::to_owned);
+            state.revision += 1;
+            let _ = notify.try_send(());
+        }
+        true
+    }
+
     pub fn select_waypoint_group(&self, world: &str, group: Option<&str>) {
         if !valid_waypoint_world(world) || group.is_some_and(|name| !valid_group(name)) {return;}
         let notify = self.notify.lock().unwrap_or_else(|error| error.into_inner());
@@ -2969,6 +3236,82 @@ impl Controller {
         true
     }
 
+    pub fn edit_waypoints(
+        &self, world: &str, keys: &BTreeSet<u64>, action: WaypointBatch<'_>,
+    ) -> Result<usize, &'static str> {
+        if keys.is_empty() { return Ok(0); }
+        let notify = self.notify.lock().unwrap_or_else(|error| error.into_inner());
+        let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+        let selected = |point: &Waypoint| point.world == world && keys.contains(&point.key());
+        if state.waypoints.iter().filter(|point| selected(point)).count() != keys.len() {
+            return Err(tr("The selection changed", "Набор выбранных меток изменился",
+                "La sélection a changé", "La selección ha cambiado", "Die Auswahl hat sich geändert"));
+        }
+        let mut changed = 0;
+        match action {
+            WaypointBatch::Move(group) => {
+                if !valid_group(group) { return Ok(0); }
+                // Validate the complete move before applying it. Two selected
+                // points may also become duplicates of each other.
+                let mut destinations = BTreeSet::new();
+                let points = state.waypoints.iter().filter(|point| point.world == world
+                    && (point.options.group == group || selected(point)));
+                for point in points {
+                    let identity = (point.dimension, point.x, point.y, point.z, &point.name, point.options.temporary);
+                    if !destinations.insert(identity) {
+                        return Err(tr("That group would contain duplicate waypoints",
+                            "В этой группе появятся одинаковые метки",
+                            "Ce groupe contiendrait des repères en double",
+                            "Ese grupo tendría marcadores duplicados",
+                            "Diese Gruppe hätte doppelte Wegpunkte"));
+                    }
+                }
+                let mut source_groups = BTreeSet::new();
+                for point in state.waypoints.iter_mut().filter(|point| selected(point)) {
+                    if point.options.group != group {
+                        let source = std::mem::replace(&mut point.options.group, group.to_owned());
+                        if !source.is_empty() { source_groups.insert(source); }
+                        changed += 1;
+                    }
+                }
+                if !source_groups.is_empty() {
+                    let named = state.groups.named.entry(world.to_owned()).or_default();
+                    for source in source_groups {
+                        if named.len() >= MAX_WAYPOINTS { break; }
+                        named.insert(source);
+                    }
+                }
+            }
+            WaypointBatch::Delete => {
+                let before = state.waypoints.len();
+                state.waypoints.retain(|point| !selected(point));
+                changed = before - state.waypoints.len();
+            }
+            WaypointBatch::Visible(visible) => {
+                for point in state.waypoints.iter_mut().filter(|point| selected(point)) {
+                    if point.options.disabled == visible {
+                        point.options.disabled = !visible;
+                        changed += 1;
+                    }
+                }
+            }
+            WaypointBatch::ThreeD(enabled) => {
+                for point in state.waypoints.iter_mut().filter(|point| selected(point)) {
+                    if point.show_3d != enabled || (enabled && point.map_only()) {
+                        point.show_3d = enabled;
+                        if enabled { point.options.visibility %= 2; }
+                        changed += 1;
+                    }
+                }
+            }
+        }
+        if changed != 0 {
+            state.revision += 1;
+            if let Some(notify) = notify.as_ref() { let _ = notify.try_send(()); }
+        }
+        Ok(changed)
+    }
+
     pub fn delete_waypoint(&self, world: &str, key: u64) -> bool {
         let notify = self.notify.lock().unwrap_or_else(|error| error.into_inner());
         let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
@@ -3026,15 +3369,24 @@ impl Controller {
         }
         let notify = self.notify.lock().unwrap_or_else(|e| e.into_inner());
         let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
-        if state.waypoints.iter().any(|waypoint| {
-            waypoint.world == world
-                && waypoint.dimension == dimension
-                && waypoint.x == x
-                && waypoint.y == y
-                && waypoint.z == z
+        if let Some(index) = state.waypoints.iter().position(|waypoint| {
+            waypoint.world == world && waypoint.dimension == dimension
+                && [waypoint.x, waypoint.y, waypoint.z] == [x, y, z]
                 && waypoint.icon == WaypointIcon::Skull
         }) {
-            return false;
+            let point = &state.waypoints[index];
+            if point.options.purpose == 1 && !point.options.disabled { return false; }
+            let mut point = state.waypoints.remove(index);
+            point.options.purpose = 1;
+            point.options.disabled = false;
+            point.options.visibility |= 1;
+            for old in &mut state.waypoints {
+                if old.world == world && old.icon == WaypointIcon::Skull { old.options.purpose = 2; }
+            }
+            state.waypoints.push(point);
+            state.revision += 1;
+            if let Some(notify) = notify.as_ref() { let _ = notify.try_send(()); }
+            return true;
         }
         let name = death_waypoint_name(
             &state.waypoints,
@@ -3050,7 +3402,7 @@ impl Controller {
                 z,
                 name,
                 initials: None,
-                options: WaypointOptions { purpose: 1, ..Default::default() },
+                options: WaypointOptions { purpose: 1, visibility: 1, ..Default::default() },
                 color: DEATH_WAYPOINT_COLOR,
                 icon: WaypointIcon::Skull,
                 biome: biome.and_then(Waypoint::clean_biome),
@@ -3353,6 +3705,20 @@ static CONTROLLER: OnceLock<Controller> = OnceLock::new();
 
 pub fn initialize(directory: PathBuf) -> &'static Controller {
     CONTROLLER.get_or_init(|| Controller::open(directory))
+}
+
+pub fn active_world(base: String) -> String {
+    match CONTROLLER.get().filter(|_| base.starts_with("server:")) {
+        Some(controller) => controller.world_for_server(base),
+        None => base,
+    }
+}
+
+pub fn death_history(world: &str) -> Vec<Waypoint> {
+    CONTROLLER.get().map_or_else(Vec::new, |controller| {
+        controller.waypoints(world).into_iter().rev()
+            .filter(|waypoint| waypoint.icon == WaypointIcon::Skull).take(10).collect()
+    })
 }
 
 pub fn shutdown() {
