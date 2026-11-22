@@ -1,6 +1,6 @@
 id = "trailgrid_maps"
 name = "Kadir's Map"
-version = "0.1.7"
+version = "0.1.10"
 description = "Explore with a configurable minimap, a persistent world map, waypoint groups, and entity radar."
 authors = ["Kadir (maintainer)"]
 license = "GPL-3.0-only"
@@ -56,6 +56,12 @@ id="radar-icons"
 file="crates/horizon-client/src/game.rs"
 name="minimap_radar_icons"
 source="src/radar_icons.rs"
+
+[[native.module]]
+id="save-scan"
+file="crates/horizon-client/src/game.rs"
+name="minimap_save_scan"
+source="src/save_scan.rs"
 
 [[native.mixin]]
 id = "map-radar-tick"
