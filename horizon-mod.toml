@@ -1,6 +1,6 @@
 id = "trailgrid_maps"
 name = "Kadir's Map"
-version = "0.1.11"
+version = "0.1.13"
 description = "Explore with a configurable minimap, a persistent world map, waypoint groups, and entity radar."
 authors = ["Kadir (maintainer)"]
 license = "GPL-3.0-only"

@@ -473,6 +473,7 @@ struct State {
     waypoint_sort: usize,
     waypoint_dimension: Dimension,
     waypoint_groups_open: bool,
+    waypoint_share_open: bool,
     waypoint_group_move: bool,
     waypoint_bulk: Option<BTreeSet<u64>>,
     waypoint_confirm_delete: bool,
@@ -508,6 +509,8 @@ struct State {
     settings_return: Option<Mode>,
     settings_tab: usize,
     settings_scroll: usize,
+    settings_search: String,
+    settings_search_focus: bool,
     settings_slider: Option<(String, [f32; 2])>,
     placement: Option<PlacementEdit>,
     radar_editor: Option<super::minimap_radar_editor::Editor>,
@@ -572,6 +575,7 @@ impl Default for State {
             waypoint_sort: 0,
             waypoint_dimension: Dimension::Player,
             waypoint_groups_open: false,
+            waypoint_share_open: false,
             waypoint_group_move: false,
             waypoint_bulk: None,
             waypoint_confirm_delete: false,
@@ -607,6 +611,8 @@ impl Default for State {
             settings_return: None,
             settings_tab: 0,
             settings_scroll: 0,
+            settings_search: String::new(),
+            settings_search_focus: false,
             settings_slider: None,
             placement: None,
             radar_editor: None,
@@ -1176,22 +1182,10 @@ fn draw_waypoint(
     } else {
         size
     };
-    if !view.large || game.map_option("world_waypoint_backgrounds") != Some(0) {
-    game.native_fill(
-        batch,
-        [
-            x - width / 2. - 1.0,
-            y - half - 1.0,
-            width + 2.0,
-            size + 2.0,
-        ],
-        0xff101010,
-    );
-    game.native_fill(
-        batch,
-        [x - width / 2., y - half, width, size],
-        waypoint_argb(waypoint.color),
-    );
+    let background = !view.large || game.map_option("world_waypoint_backgrounds") != Some(0);
+    let color = waypoint_argb(waypoint.color);
+    if background {
+        panel_shape(game,batch,[x-width/2.-1.,y-half-1.,width+2.,size+2.],UI_INPUT,color);
     }
     if waypoint.icon == runtime::WaypointIcon::Skull {
         draw_skull(game, batch, [x, y], size * 0.95);
@@ -1201,9 +1195,7 @@ fn draw_waypoint(
         batch,
         &letter,
         [x - game.map_text_width(&letter) / 2.0, y - 4.0],
-        if view.large && game.map_option("world_waypoint_backgrounds")==Some(0) {
-            waypoint_argb(if waypoint.color==0 {0xffffff}else{waypoint.color})
-        } else if waypoint.color == 0 { 0xffffffff } else { 0xff201800 },
+        if background || waypoint.color == 0 { UI_TEXT } else { color },
         false,
     );
 }
@@ -2240,17 +2232,80 @@ fn draw_notice(game: &Game<'_>, batch: &mut HudBatch, state: &State) {
     game.map_text(batch, &text, [x, y], UI_ACCENT, true);
 }
 
-pub(super) const UI_SURFACE: u32 = 0xf5272527;
-pub(super) const UI_EDGE: u32 = 0xff675d58;
-pub(super) const UI_ACCENT: u32 = 0xffeab979;
-const UI_SELECTED: u32 = 0xff53433a;
-const UI_HOVER: u32 = 0xff433c38;
+pub(super) const UI_SURFACE: u32 = 0xfa111e2b;
+pub(super) const UI_EDGE: u32 = 0xff3e566d;
+pub(super) const UI_ACCENT: u32 = 0xff76ebd0;
+pub(super) const UI_TEXT: u32 = 0xffeef6fc;
+pub(super) const UI_MUTED: u32 = 0xffaabed0;
+pub(super) const UI_SCRIM: u32 = 0xc209131e;
+pub(super) const UI_ROW: u32 = 0xff1a2a3a;
+const UI_INPUT: u32 = 0xff0b1723;
+const UI_SELECTED: u32 = 0xff204c53;
+pub(super) const UI_HOVER: u32 = 0xff273f52;
+const UI_WARNING: u32 = 0xffffcf80;
+
+fn panel_shape(game: &Game<'_>, batch: &mut HudBatch, rect: [f32; 4], fill: u32, edge: u32) {
+    let [x, y, w, h] = rect;
+    if w <= 0. || h <= 0. {
+        return;
+    }
+    if w < 5. || h < 5. {
+        game.native_fill(batch, rect, fill);
+        return;
+    }
+    game.native_fill(batch, [x + 1., y, w - 2., h], fill);
+    game.native_fill(batch, [x, y + 1., 1., h - 2.], fill);
+    game.native_fill(batch, [x + w - 1., y + 1., 1., h - 2.], fill);
+    for rect in [[x + 2., y, w - 4., 1.], [x + 2., y + h - 1., w - 4., 1.],
+        [x, y + 2., 1., h - 4.], [x + w - 1., y + 2., 1., h - 4.]] {
+        game.native_fill(batch, rect, edge);
+    }
+}
 
 pub(super) fn ui_panel(game: &Game<'_>, batch: &mut HudBatch, rect: [f32; 4]) {
     let [x, y, w, h] = rect;
-    game.native_fill(batch, rect, UI_SURFACE);
-    for edge in [[x, y, w, 1.], [x, y + h - 1., w, 1.], [x, y, 1., h], [x + w - 1., y, 1., h]] {
-        game.native_fill(batch, edge, UI_EDGE);
+    game.native_fill(batch, [x + 2., y + 3., w, h], 0x55070e17);
+    panel_shape(game, batch, rect, UI_SURFACE, UI_EDGE);
+}
+
+pub(super) fn ui_heading(game: &Game<'_>, batch: &mut HudBatch, rect: [f32; 4], title: &str) {
+    let [x, y, w, _] = rect;
+    game.native_fill(batch, [x + 2., y + 1., w - 4., 22.], UI_ROW);
+    game.native_fill(batch, [x + 2., y + 23., w - 4., 1.], UI_EDGE);
+    game.native_fill(batch, [x + 9., y + 7., 2., 10.], UI_ACCENT);
+    game.map_text(batch, &fit_text(game, title, w - 31.), [x + 17., y + 8.], UI_TEXT, false);
+}
+
+pub(super) fn ui_field(game: &Game<'_>, batch: &mut HudBatch, rect: [f32; 4], focused: bool) {
+    panel_shape(game, batch, rect, UI_INPUT, if focused {UI_ACCENT} else {UI_EDGE});
+}
+
+#[derive(Clone, Copy)]
+pub(super) enum ButtonStyle { Plain, Current, Primary, Confirm }
+
+pub(super) fn ui_button(
+    game: &Game<'_>, batch: &mut HudBatch, rect: [f32; 4], label: &str,
+    mouse: [f32; 2], enabled: bool, style: ButtonStyle,
+) {
+    let [x, y, w, h] = rect;
+    let hover = enabled && inside(mouse, rect);
+    let (fill, edge, text) = if !enabled {
+        (0xff162332, 0xff293e50, 0xff8ca2b5)
+    } else {
+        match style {
+            ButtonStyle::Plain => (if hover {UI_HOVER} else {UI_ROW}, UI_EDGE, UI_TEXT),
+            ButtonStyle::Current => (UI_SELECTED, UI_ACCENT, UI_TEXT),
+            ButtonStyle::Primary => (if hover {0xffa0f5e2} else {UI_ACCENT}, UI_ACCENT, UI_INPUT),
+            ButtonStyle::Confirm => (if hover {0xff624238} else {0xff492f2d}, UI_WARNING, UI_WARNING),
+        }
+    };
+    panel_shape(game, batch, rect, fill, edge);
+    if !label.is_empty() {
+        let label = fit_text(game, label, w - 8.);
+        game.map_text(batch, &label, [
+            x + ((w - game.map_text_width(&label)) / 2.).floor(),
+            y + ((h - 8.) / 2.).floor(),
+        ], text, false);
     }
 }
 
@@ -2276,24 +2331,7 @@ pub(super) fn button(
     mouse: [f32; 2],
     enabled: bool,
 ) {
-    let [x, y, w, h] = rect;
-    let hover = enabled && inside(mouse, rect);
-    game.native_fill(batch, rect, if enabled { 0xff75655d } else { 0xff443d3b });
-    game.native_fill(batch, [x + 1., y + 1., (w - 2.).max(0.), (h - 2.).max(0.)],
-        if hover { UI_HOVER } else if enabled { 0xff332e2d } else { 0xff282526 });
-    if label.is_empty() { return; }
-    let label = fit_text(game, label, w - 6.);
-    let text_color = if hover { UI_ACCENT } else if enabled { 0xfffff3e7 } else { 0xffa59991 };
-    game.map_text(
-        batch,
-        &label,
-        [
-            x + ((w - game.map_text_width(&label)) / 2.).floor(),
-            y + ((h - 8.) / 2.).floor(),
-        ],
-        text_color,
-        false,
-    );
+    ui_button(game, batch, rect, label, mouse, enabled, ButtonStyle::Plain);
 }
 
 fn waypoint_visible_rows(height: f32) -> usize {
@@ -2317,13 +2355,19 @@ fn show_hidden_on_map(game: &Game<'_>, large: bool) -> bool {
     large && game.map_option("world_show_disabled_waypoints") == Some(1)
 }
 
+fn work_area(width: f32) -> [f32; 2] {
+    let w = (width - 16.).clamp(1., 680.);
+    [((width - w) * 0.5).floor(), w]
+}
+
 fn waypoint_group_buttons(width: f32) -> [[f32;4];4] {
-    let cell = ((width-36.)/4.).clamp(1.,150.);
+    let [x, w] = work_area(width);
+    let cell = ((w-24.)/3.).clamp(1.,146.);
     [
-        [width-cell-12.,8.,cell,18.],
-        [12.,29.,cell,17.],
-        [16.+cell,29.,cell,17.],
-        [20.+2.*cell,29.,cell,17.],
+        [x+w-cell-8.,9.,cell,18.],
+        [x+8.,32.,cell,17.],
+        [x+12.+cell,32.,cell,17.],
+        [x+16.+2.*cell,32.,cell,17.],
     ]
 }
 
@@ -2334,8 +2378,10 @@ fn waypoint_footer(width: f32, height: f32) -> [[f32; 4]; 3] {
 }
 
 fn waypoint_filters(width:f32)->[[f32;4];3] {
-    let w=((width-32.)/4.).clamp(1.,151.);
-    [[12.,51.,(width-32.-2.*w).max(1.),18.],[width-2.*w-16.,51.,w,18.],[width-w-12.,51.,w,18.]]
+    let [x, w] = work_area(width);
+    let filter = ((w - 24.) / 4.).clamp(1., 142.);
+    [[x+8.,53.,(w-24.-2.*filter).max(1.),18.],
+        [x+w-12.-2.*filter,53.,filter,18.], [x+w-8.-filter,53.,filter,18.]]
 }
 
 fn group_label(group:Option<&str>)->&str {
@@ -2384,8 +2430,9 @@ fn visible_waypoint_rows<'a>(game:&Game<'_>,state:&'a State,width:f32,height:f32
     let points=listed_waypoints(game,state);
     let count=waypoint_visible_rows(height);
     let start=state.waypoint_scroll.min(points.len().saturating_sub(count));
+    let [x, w] = work_area(width);
     points.into_iter().skip(start).take(count).enumerate()
-        .map(move |(row,(index,point))| (index,point,[12.,74.+row as f32*36.,(width-24.).max(1.),35.]))
+        .map(move |(row,(index,point))| (index,point,[x+8.,76.+row as f32*36.,w-16.,34.]))
 }
 
 /// The clickable 3D-visibility toggle at the right end of a waypoint row.
@@ -2398,22 +2445,36 @@ fn waypoint_scope_rect(row: [f32; 4]) -> [f32; 4] {
     [toggle[0] - 86., toggle[1], 58., 18.]
 }
 
-// Shared by drawing and hit testing, including narrow GUI viewports.
-fn waypoint_actions(width: f32, height: f32) -> [[f32; 4]; 6] {
-    let button_width = ((width - 54.) / 6.).clamp(1., 110.);
-    let x = (width - 6. * button_width - 30.) * 0.5;
-    std::array::from_fn(|i| {
-        [
-            x + i as f32 * (button_width + 6.0),
-            height - 48.0,
-            button_width,
-            18.0,
-        ]
-    })
+fn waypoint_strip<const N: usize>(width: f32, y: f32, max_width: f32) -> [[f32; 4]; N] {
+    let gap = 6. * (N - 1) as f32;
+    let w = ((width - 24. - gap) / N as f32).clamp(1., max_width);
+    let x = ((width - N as f32 * w - gap) * 0.5).floor();
+    std::array::from_fn(|i| [x + i as f32 * (w + 6.), y, w, 18.])
+}
+
+struct WaypointActions {
+    edit: [f32; 4],
+    delete: [f32; 4],
+    show: [f32; 4],
+    share: [[f32; 4]; 3],
+    more: Option<([f32; 4], [f32; 4])>,
+}
+
+// Shared by drawing and hit testing so hidden actions cannot be clicked.
+fn waypoint_actions(width: f32, height: f32) -> WaypointActions {
+    if width >= 520. {
+        let [edit, delete, show, copy, paste, chat] = waypoint_strip(width, height-48., 106.);
+        return WaypointActions { edit, delete, show, share: [copy,paste,chat], more: None };
+    }
+    let [edit, delete, show, trigger] = waypoint_strip(width, height-48., 118.);
+    let menu_width = (width * 0.4).clamp(100., 174.);
+    let menu = [trigger[0]+trigger[2]-menu_width, trigger[1]-68., menu_width, 64.];
+    let share = std::array::from_fn(|i| [menu[0]+4.,menu[1]+4.+19.*i as f32,menu[2]-8.,18.]);
+    WaypointActions { edit, delete, show, share, more: Some((trigger,menu)) }
 }
 
 fn waypoint_bulk_actions(width: f32, height: f32) -> [[f32; 4]; 6] {
-    waypoint_actions(width, height - 24.)
+    waypoint_strip(width, height - 72., 106.)
 }
 
 fn change_waypoint_group(game: &Game<'_>, state: &mut State, group: Option<String>) {
@@ -2536,19 +2597,16 @@ fn apply_map_focus(state: &mut State, large: bool, selected: Dimension) {
 }
 
 fn draw_waypoints_screen(game: &Game<'_>, batch: &mut HudBatch, state: &State) {
-    game.native_fill(batch, [0., 0., batch.width, batch.height], 0xd21d1a1a);
+    game.native_fill(batch, [0., 0., batch.width, batch.height], UI_SCRIM);
+    let [x, w] = work_area(batch.width);
+    let panel = [x, 5., w, (batch.height - 10.).max(1.)];
+    ui_panel(game, batch, panel);
     let title = tr("Waypoints", "Метки", "Repères", "Marcadores", "Wegpunkte");
-    game.map_text(
-        batch,
-        title,
-        [((batch.width - game.map_text_width(title)) / 2.).floor(), 11.],
-        0xfffff3e7,
-        true,
-    );
+    ui_heading(game, batch, panel, title);
     let mouse = game.cursor();
     let [options,create,back] = waypoint_footer(batch.width, batch.height);
     button(game,batch,options,tr("Settings","Настройки","Options","Opciones","Optionen"),mouse,true);
-    button(
+    ui_button(
         game,
         batch,
         create,
@@ -2561,6 +2619,7 @@ fn draw_waypoints_screen(game: &Game<'_>, batch: &mut HudBatch, state: &State) {
         ),
         mouse,
         true,
+        ButtonStyle::Primary,
     );
     button(
         game,
@@ -2583,14 +2642,11 @@ fn draw_waypoints_screen(game: &Game<'_>, batch: &mut HudBatch, state: &State) {
         button(game,batch,rect,&fit_text(game,label,rect[2]-8.),mouse,enabled);
     }
     let [search,dimension,sort]=waypoint_filters(batch.width);
-    ui_panel(game, batch, search);
-    if state.waypoint_search_focus {
-        game.native_fill(batch, [search[0] + 1., search[1] + 1., search[2] - 2., 1.], UI_ACCENT);
-    }
+    ui_field(game, batch, search, state.waypoint_search_focus);
     let hint=tr("Search waypoints…","Поиск метки…","Rechercher un repère…","Buscar marcador…","Wegpunkt suchen…");
     let search_text=if state.waypoint_search.is_empty(){hint}else{&state.waypoint_search};
     game.map_text(batch,&fit_text(game,search_text,search[2]-12.),[search[0]+6.,search[1]+5.],
-        if state.waypoint_search.is_empty(){0xffa8b8c5}else{0xffeef5f8},false);
+        if state.waypoint_search.is_empty(){UI_MUTED}else{UI_TEXT},false);
     let dimension_label=if state.waypoint_dimension==Dimension::Player {
         tr("All dimensions","Все измерения","Toutes dimensions","Todas dimensiones","Alle Dimensionen")
     } else {state.waypoint_dimension.label()};
@@ -2601,15 +2657,20 @@ fn draw_waypoints_screen(game: &Game<'_>, batch: &mut HudBatch, state: &State) {
         _=>tr("Added order","По созданию","Par création","Por creación","Nach Erstellung"),
     };
     button(game,batch,sort,&fit_text(game,sort_label,sort[2]-8.),mouse,true);
-    let list_rect = [10., 72., batch.width - 20., (batch.height - 149.).max(38.)];
-    ui_panel(game, batch, list_rect);
+    let list_rect = [x + 6., 74., w - 12., (batch.height - 150.).max(38.)];
+    panel_shape(game, batch, list_rect, UI_INPUT, UI_EDGE);
     let total = listed_waypoints(game, state).len();
     let visible = waypoint_visible_rows(batch.height);
     if total == 0 {
-        game.map_text(batch,tr("No matching waypoints","Нет подходящих меток","Aucun repère trouvé","No hay marcadores coincidentes","Keine passenden Wegpunkte"),
-            [16.,83.],0xffadbcc7,true);
+        let hint = if state.waypoints.is_empty() {
+            tr("No waypoints yet","Меток пока нет","Aucun repère","Sin marcadores","Noch keine Wegpunkte")
+        } else {
+            tr("No matching waypoints","Нет подходящих меток","Aucun repère trouvé","No hay coincidencias","Keine passenden Wegpunkte")
+        };
+        let hint = fit_text(game, hint, list_rect[2]-16.);
+        game.map_text(batch, &hint, [x+(w-game.map_text_width(&hint))/2., 91.], UI_MUTED, false);
     }
-    let mut biome_tooltip = None;
+    let mut row_tooltip = None;
     for (i, (index, waypoint, row)) in visible_waypoint_rows(game,state,batch.width,batch.height).enumerate() {
         let selected = state.waypoint_bulk.as_ref().map_or(
             state.waypoint_selected == Some(waypoint.key()), |keys| keys.contains(&waypoint.key()));
@@ -2620,30 +2681,36 @@ fn draw_waypoints_screen(game: &Game<'_>, batch: &mut HudBatch, state: &State) {
         } else if inside(mouse, row) {
             game.native_fill(batch, row, UI_HOVER);
         } else if i % 2 == 1 {
-            game.native_fill(batch, row, 0xff302c2c);
+            game.native_fill(batch, row, UI_ROW);
         }
-        let letter_x = row[0] + 6.0;
+        let chip = [row[0]+5.,row[1]+5.,24.,24.];
+        let mark = waypoint_argb(if waypoint.color == 0 { 0xb9d0dc } else { waypoint.color });
+        panel_shape(game, batch, chip, UI_INPUT, mark);
         if waypoint.icon == runtime::WaypointIcon::Skull {
-            draw_skull(game, batch, [letter_x + 4.0, row[1] + 8.0], 10.0);
+            draw_skull(game, batch, [chip[0]+12., chip[1]+12.], 14.);
         }
         let letter = waypoint_text(state, index, waypoint);
         if waypoint.icon == runtime::WaypointIcon::Letter {
+            let letter = fit_text(game, &letter, chip[2]-5.);
             game.map_text(
                 batch,
                 &letter,
-                [letter_x, row[1] + 3.0],
-                if waypoint.color == 0 { 0xffdddddd } else { waypoint_argb(waypoint.color) },
+                [chip[0] + ((chip[2]-game.map_text_width(&letter))/2.).floor(), chip[1]+8.],
+                mark,
                 false,
             );
         }
-        let name_x = letter_x + game.map_text_width(&letter).max(6.0) + 6.0;
+        let name_x = row[0] + 36.;
         let right = waypoint_scope_rect(row)[0] - 6.;
         let name = fit_text(game, &waypoint.name, right - name_x);
+        if name != waypoint.name && inside(mouse, [name_x,row[1],(right-name_x).max(0.),20.]) {
+            row_tooltip = Some(waypoint.name.clone());
+        }
         game.map_text(
             batch,
             &name,
-            [name_x, row[1] + 3.0],
-            0xffffff,
+            [name_x, row[1] + 6.],
+            if waypoint.options.disabled { UI_MUTED } else { UI_TEXT },
             false,
         );
         let biome = waypoint.biome.as_deref();
@@ -2654,7 +2721,7 @@ fn draw_waypoints_screen(game: &Game<'_>, batch: &mut HudBatch, state: &State) {
                 let label_x = biome_x + 20.0;
                 if label_x < right {
                     let label = fit_text(game, &localized_biome(biome), right - label_x);
-                    game.map_text(batch, &label, [label_x, row[1] + 3.0], 0x8fcf86, false);
+                    game.map_text(batch, &label, [label_x, row[1] + 6.], UI_MUTED, false);
                 }
             }
             if inside(mouse, [biome_x, row[1] + 2.0, right - biome_x, 17.0]) {
@@ -2662,14 +2729,14 @@ fn draw_waypoints_screen(game: &Game<'_>, batch: &mut HudBatch, state: &State) {
                     || tr("Biome: —", "биом: —", "Biome : —", "Bioma: —", "Biom: —").to_owned(),
                     localized_biome,
                 );
-                biome_tooltip = Some(label);
+                row_tooltip = Some(label);
             }
         }
         dimension_icon(
             game,
             batch,
             waypoint.dimension,
-            [row[0] + 6.0, row[1] + 22.0],
+            [name_x, row[1] + 16.],
         );
         let mut detail=waypoint.dimension.label().to_owned();
         if game.map_option("waypoint_hide_coords")!=Some(1) {
@@ -2684,9 +2751,9 @@ fn draw_waypoints_screen(game: &Game<'_>, batch: &mut HudBatch, state: &State) {
         }
         game.map_text(
             batch,
-            &fit_text(game, &detail, right - row[0] - 26.),
-            [row[0] + 26.0, row[1] + 25.0],
-            0xaaaaaa,
+            &fit_text(game, &detail, right - name_x - 19.),
+            [name_x + 19., row[1] + 22.],
+            UI_MUTED,
             false,
         );
         let toggle = waypoint_3d_rect(row);
@@ -2699,22 +2766,21 @@ fn draw_waypoints_screen(game: &Game<'_>, batch: &mut HudBatch, state: &State) {
             tr("Local", "Рядом", "Local", "Local", "Lokal")
         };
         button(game, batch, scope, &fit_text(game, scope_label, scope[2] - 6.), mouse, true);
-        button(game, batch, disabled, if waypoint.options.disabled { "○" } else { "●" }, mouse, true);
-        button(game, batch, toggle, "3D", mouse, true);
-        if on {
-            game.native_fill(batch, [toggle[0] + 2., toggle[1] + toggle[3] - 2., toggle[2] - 4., 1.], UI_ACCENT);
-        }
+        ui_button(game, batch, disabled, if waypoint.options.disabled { "○" } else { "●" }, mouse, true,
+            if waypoint.options.disabled { ButtonStyle::Plain } else { ButtonStyle::Current });
+        ui_button(game, batch, toggle, "3D", mouse, true,
+            if on { ButtonStyle::Current } else { ButtonStyle::Plain });
     }
     draw_scroll_indicator(game, batch, list_rect, total, visible, state.waypoint_scroll);
     let selected = selected_waypoint(state);
-    let [rename, delete, show, share, paste, chat] = waypoint_actions(batch.width, batch.height);
+    let actions = waypoint_actions(batch.width, batch.height);
     let count = state.waypoint_bulk.as_ref().map_or(0, BTreeSet::len);
     let selecting = state.waypoint_bulk.is_some();
     let selection_label = if selecting {
         localized_format!("Finish selecting ({})", "Завершить выбор ({})", "Terminer la sélection ({})",
             "Terminar selección ({})", "Auswahl beenden ({})", count)
     } else {
-        tr("Select multiple", "Выбор меток", "Sélection multiple", "Seleccionar varios", "Mehrfachauswahl").to_owned()
+        tr("Select multiple", "Выбрать", "Sélection", "Seleccionar", "Auswählen").to_owned()
     };
     let three_d = bulk_three_d_value(state);
     for (rect, (label, enabled)) in waypoint_bulk_actions(batch.width, batch.height).into_iter().zip([
@@ -2731,27 +2797,28 @@ fn draw_waypoints_screen(game: &Game<'_>, batch: &mut HudBatch, state: &State) {
     button(
         game,
         batch,
-        rename,
+        actions.edit,
         tr("Edit", "Изменить", "Modifier", "Editar", "Bearbeiten"),
         mouse,
         selected.is_some(),
     );
-    button(
+    ui_button(
         game,
         batch,
-        delete,
+        actions.delete,
         if state.waypoint_confirm_delete {
-            tr("Confirm delete", "Подтвердить", "Confirmer", "Confirmar", "Bestätigen")
+            tr("Delete?", "Удалить?", "Supprimer ?", "¿Borrar?", "Löschen?")
         } else {
             tr("Delete", "Удалить", "Supprimer", "Eliminar", "Löschen")
         },
         mouse,
         selected.is_some() || count != 0,
+        if state.waypoint_confirm_delete { ButtonStyle::Confirm } else { ButtonStyle::Plain },
     );
     button(
         game,
         batch,
-        show,
+        actions.show,
         tr(
             "Show on map",
             "На карте",
@@ -2762,12 +2829,23 @@ fn draw_waypoints_screen(game: &Game<'_>, batch: &mut HudBatch, state: &State) {
         mouse,
         selected.is_some(),
     );
-    button(game, batch, share, tr("Copy link", "Копировать", "Copier le lien", "Copiar enlace", "Link kopieren"), mouse, selected.is_some());
-    button(game, batch, paste, tr("Paste link", "Вставить", "Coller le lien", "Pegar enlace", "Link einfügen"), mouse, true);
-    button(game, batch, chat, tr("Open in chat", "В чат", "Ouvrir dans le chat",
-        "Abrir en el chat", "Im Chat öffnen"), mouse, selected.is_some());
+    let share_open = state.waypoint_share_open && state.mode == Mode::Waypoints;
+    if let Some((trigger, menu)) = actions.more {
+        ui_button(game,batch,trigger,tr("Share","Обмен","Partager","Compartir","Teilen"),
+            mouse,true,if share_open {ButtonStyle::Current} else {ButtonStyle::Plain});
+        if share_open {ui_panel(game,batch,menu);}
+    }
+    if actions.more.is_none() || share_open {
+        for (rect, (label, enabled)) in actions.share.into_iter().zip([
+            (tr("Copy link","Копировать","Copier le lien","Copiar enlace","Link kopieren"), selected.is_some()),
+            (tr("Paste link","Вставить","Coller le lien","Pegar enlace","Link einfügen"), true),
+            (tr("Open in chat","В чат","Ouvrir dans le chat","Abrir en el chat","Im Chat öffnen"), selected.is_some()),
+        ]) {
+            button(game,batch,rect,label,mouse,enabled);
+        }
+    }
     draw_notice(game, batch, state);
-    if let Some(label) = biome_tooltip {
+    if !share_open && let Some(label) = row_tooltip {
         draw_tooltip(game, batch, &label, mouse);
     }
     if state.waypoint_groups_open {
@@ -2779,33 +2857,37 @@ fn draw_waypoints_screen(game: &Game<'_>, batch: &mut HudBatch, state: &State) {
             let selected=!state.waypoint_group_move && group==state.waypoint_group;
             let label=if selected {format!("✓ {}",group_label(group.as_deref()))}
                 else {group_label(group.as_deref()).to_owned()};
-            button(game,batch,row,&fit_text(game,&label,row[2]-8.),mouse,true);
+            ui_button(game,batch,row,&label,mouse,true,
+                if selected { ButtonStyle::Current } else { ButtonStyle::Plain });
         }
     }
 
 }
 
-const NAME_FORM_HEIGHT: f32 = 156.0;
-
-fn name_form_rect(viewport_width: f32, height: f32) -> [f32; 4] {
-    let width = 340.0_f32.min(viewport_width - 24.0);
+fn name_form_rect(viewport_width: f32, height: f32, group_only: bool) -> [f32; 4] {
+    let width = 348.0_f32.min(viewport_width - 24.0);
+    let form_height = if group_only { 99. } else { 169. };
     [
         (viewport_width - width) / 2.0,
-        height / 2.0 - NAME_FORM_HEIGHT / 2.0,
+        ((height - form_height) * 0.5).floor(),
         width,
-        NAME_FORM_HEIGHT,
+        form_height,
     ]
 }
 
+fn name_field(rect: [f32; 4]) -> [f32; 4] {
+    [rect[0] + 10., rect[1] + 32., rect[2] - 20., 20.]
+}
+
 fn group_field(rect: [f32; 4]) -> [f32; 4] {
-    [rect[0] + 10.0, rect[1] + 56.0, rect[2] - 20.0, 18.0]
+    [rect[0] + 10., rect[1] + 67., rect[2] - 20., 20.]
 }
 
 fn color_swatch_at(rect: [f32; 4], index: usize) -> [f32; 4] {
     let step = ((rect[2] - 24.) / runtime::WAYPOINT_COLORS.len() as f32).min(22.);
     [
         rect[0] + 12. + index as f32 * step,
-        rect[1] + 91.0,
+        rect[1] + 105.,
         (step - 4.).max(1.),
         18.0,
     ]
@@ -2819,17 +2901,14 @@ fn name_buttons(rect: [f32; 4]) -> [[f32; 4]; 2] {
 }
 
 fn draw_name_field(game: &Game<'_>, batch: &mut HudBatch, rect: [f32; 4], text: &str, active: bool, selected: bool) {
-    ui_panel(game, batch, rect);
+    ui_field(game, batch, rect, active);
     let [x, y, w, _] = rect;
     let cursor = if active && !selected { "_" } else { "" };
     let label = fit_text(game, &format!("{text}{cursor}"), w - 8.);
-    if active {
-        game.native_fill(batch, [x + 1., y + 1., w - 2., 1.], UI_ACCENT);
-        if selected && !label.is_empty() {
-            game.native_fill(batch, [x + 3., y + 3., game.map_text_width(&label) + 2., 12.], UI_SELECTED);
-        }
+    if active && selected && !label.is_empty() {
+        game.native_fill(batch, [x + 3., y + 4., game.map_text_width(&label) + 2., 12.], UI_SELECTED);
     }
-    game.map_text(batch, &label, [x + 4., y + 5.], 0xffffff, false);
+    game.map_text(batch, &label, [x + 4., y + 6.], UI_TEXT, false);
 }
 
 fn draw_name_form(game: &Game<'_>, batch: &mut HudBatch, state: &State, form: &NameForm) {
@@ -2839,45 +2918,39 @@ fn draw_name_form(game: &Game<'_>, batch: &mut HudBatch, state: &State, form: &N
         Mode::Name | Mode::Settings => {}
         Mode::Caches => draw_cache_screen(game, batch, state),
     }
-    game.native_fill(batch, [0.0, 0.0, batch.width, batch.height], 0x70000000);
-    let rect = name_form_rect(batch.width, batch.height);
+    game.native_fill(batch, [0., 0., batch.width, batch.height], UI_SCRIM);
+    let rect = name_form_rect(batch.width, batch.height, form.group_edit.is_some());
     ui_panel(game, batch, rect);
-    game.map_text(
-        batch,
-        if form.group_edit.is_some() {
+    let title = if form.group_edit.is_some() {
             tr("Group name","Название группы","Nom du groupe","Nombre del grupo","Gruppenname")
         } else if form.rename.is_some() {
             tr(
                 "Edit waypoint",
-                "Изменить вейпоинт",
+                "Изменить метку",
                 "Modifier le repère",
                 "Editar marcador",
                 "Wegpunkt bearbeiten",
             )
         } else {
             tr(
-                "Waypoint name",
-                "Название вейпоинта",
+                "New waypoint",
+                "Новая метка",
                 "Nom du repère",
                 "Nombre del marcador",
                 "Wegpunktname",
             )
-        },
-        [rect[0] + 10.0, rect[1] + 8.0],
-        0xffffff,
-        true,
-    );
-    let field = [rect[0] + 10.0, rect[1] + 26.0, rect[2] - 20.0, 18.0];
-    draw_name_field(game, batch, field, &form.text, !form.group_focused, form.select_all);
+        };
+    ui_heading(game, batch, rect, title);
+    draw_name_field(game, batch, name_field(rect), &form.text, !form.group_focused, form.select_all);
     if form.group_edit.is_none() {
     let group = group_field(rect);
-    game.map_text(batch, tr("Group", "Группа", "Groupe", "Grupo", "Gruppe"), [group[0], group[1]-10.0], 0xaaaaaa, false);
+    game.map_text(batch, tr("Group", "Группа", "Groupe", "Grupo", "Gruppe"), [group[0], group[1]-10.0], UI_MUTED, false);
     draw_name_field(game, batch, group, &form.group, form.group_focused, form.select_all);
     game.map_text(
         batch,
         tr("Colour", "Цвет", "Couleur", "Color", "Farbe"),
-        [rect[0] + 10.0, rect[1] + 79.0],
-        0xaaaaaa,
+        [rect[0] + 10., rect[1] + 93.],
+        UI_MUTED,
         false,
     );
     for (index, &color) in runtime::WAYPOINT_COLORS.iter().enumerate() {
@@ -2891,7 +2964,7 @@ fn draw_name_form(game: &Game<'_>, batch: &mut HudBatch, state: &State, form: &N
                     swatch[2] + 4.0,
                     swatch[3] + 4.0,
                 ],
-                UI_ACCENT,
+                UI_TEXT,
             );
         }
         game.native_fill(batch, swatch, waypoint_argb(color));
@@ -2899,13 +2972,14 @@ fn draw_name_form(game: &Game<'_>, batch: &mut HudBatch, state: &State, form: &N
     }
     let mouse = game.cursor();
     let [save, cancel] = name_buttons(rect);
-    button(
+    ui_button(
         game,
         batch,
         save,
         tr("Save", "Сохранить", "Enregistrer", "Guardar", "Speichern"),
         mouse,
         true,
+        ButtonStyle::Primary,
     );
     button(
         game,
@@ -2924,8 +2998,8 @@ fn draw_name_form(game: &Game<'_>, batch: &mut HudBatch, state: &State, form: &N
             "Intro — guardar, Esc — cancelar",
             "Eingabe — speichern, Esc — abbrechen",
         ),
-        [rect[0] + 10.0, rect[1] + 116.0],
-        0x888f98,
+        [rect[0] + 10., rect[1] + rect[3] - 42.],
+        UI_MUTED,
         false,
     );
 }
@@ -3563,16 +3637,8 @@ fn draw_world_waypoints(
             10.
         };
         let start = batch.vertices.len();
-        game.native_fill(
-            batch,
-            [x - width / 2. - 1., y - 6.0, width + 2., 12.0],
-            0xff101010,
-        );
-        game.native_fill(
-            batch,
-            [x - width / 2., y - 5.0, width, 10.0],
-            waypoint_argb(waypoint.color),
-        );
+        let marker_color = waypoint_argb(waypoint.color);
+        panel_shape(game, batch, [x - width/2. - 1., y - 6., width + 2., 12.],UI_INPUT,marker_color);
         if waypoint.icon == runtime::WaypointIcon::Skull {
             draw_skull(game, batch, [x, y], 9.5);
         } else {
@@ -3580,7 +3646,7 @@ fn draw_world_waypoints(
                 batch,
                 &letter,
                 [x - game.map_text_width(&letter) / 2.0, y - 4.0],
-                if waypoint.color == 0 { 0xffffffff } else { 0xff201800 },
+                UI_TEXT,
                 false,
             );
         }
@@ -3620,13 +3686,14 @@ fn draw_world_waypoints(
             let gap=if name.is_some() && dist.is_some(){5.} else {0.};
             let label_x=waypoint_label_left(x,width*scale,name_width+dist_width+gap,batch.width);
             let label_y=y-4.;
-            let label_color=if waypoint.icon==runtime::WaypointIcon::Skull {0xffe9e6dc}
-                else {waypoint_argb(waypoint.color)};
-            game.native_fill(batch,[label_x-3.,label_y-2.,name_width+dist_width+gap+6.,11.*name_scale.max(dist_scale)],0xd010151d);
-            for (text,left,scale) in [(name,label_x,name_scale),(dist.as_deref(),label_x+name_width+gap,dist_scale)] {
+            let label_rect=[label_x-3.,label_y-2.,name_width+dist_width+gap+6.,11.*name_scale.max(dist_scale)];
+            panel_shape(game,batch,label_rect,UI_SURFACE,UI_EDGE);
+            for (text,left,scale,color) in [
+                (name,label_x,name_scale,UI_TEXT),(dist.as_deref(),label_x+name_width+gap,dist_scale,UI_ACCENT),
+            ] {
                 if let Some(text)=text {
                     let first=batch.vertices.len();
-                    game.map_text(batch,text,[left,label_y],label_color,true);
+                    game.map_text(batch,text,[left,label_y],color,false);
                     batch.scale_since(first,left,label_y,scale,scale);
                 }
             }
@@ -4198,6 +4265,7 @@ pub(super) fn frame(game: &mut Game<'_>, elapsed: Duration) {
             state.waypoint_search_focus = false;
             state.server_world_focus = false;
             state.waypoint_groups_open = false;
+            state.waypoint_share_open = false;
             state.waypoint_group_move = false;
             state.waypoint_bulk = None;
             state.waypoint_confirm_delete = false;
@@ -5187,7 +5255,9 @@ fn draw_hud(game: &Game<'_>, batch: &mut HudBatch, corners: &mut Corners) {
                     } else { x };
                     let top = y + size + 2.;
                     let opacity = u32::from(game.map_option("minimap_info_background").unwrap_or(40).min(100));
-                    game.native_fill(batch, [left, top, width, footer - 2.], (opacity * 255 / 100) << 24);
+                    let alpha = (opacity * 255 / 100) << 24;
+                    game.native_fill(batch, [left, top, width, footer - 2.], alpha | (UI_INPUT & 0xffffff));
+                    game.native_fill(batch, [left, top, width, 1.], alpha | (UI_ACCENT & 0xffffff));
                     let alignment = game.map_option("minimap_info_alignment").unwrap_or(0);
                     for (index, (line, fg, bg)) in lines.iter().enumerate() {
                         if let Some(color) = bg {
@@ -5202,7 +5272,7 @@ fn draw_hud(game: &Game<'_>, batch: &mut HudBatch, corners: &mut Corners) {
                         };
                         let baseline = top + (index as f32 * 12. + 1.) * scale;
                         let first = batch.vertices.len();
-                        game.map_text(batch, line, [start, baseline], fg.unwrap_or(0xdddddd), true);
+                        game.map_text(batch, line, [start, baseline], fg.unwrap_or(UI_TEXT), true);
                         batch.scale_since(first, start, baseline, scale, scale);
                     }
                 }
@@ -5825,7 +5895,7 @@ fn map_overlay_inside(at: [f32; 2], rect: [f32; 4], round: bool) -> bool {
 fn draw_minimap_frame(game: &Game<'_>, batch: &mut HudBatch, rect: [f32; 4], round: bool) {
     let mode = game.map_option("minimap_frame").unwrap_or(0);
     if mode == 3 { return; }
-    let color = 0xff00_0000 | if mode == 0 { 0x303038 } else {
+    let color = 0xff00_0000 | if mode == 0 { UI_INPUT & 0xffffff } else {
         game.map_color_option("minimap_frame_color").unwrap_or(0x44444a)
     };
     let [x,y,w,h] = rect;
@@ -5840,10 +5910,24 @@ fn draw_minimap_frame(game: &Game<'_>, batch: &mut HudBatch, rect: [f32; 4], rou
         for step in 0..96 {
             draw_line(game,batch,ring(step),ring(step+1),rect,color);
         }
+        if mode == 0 {
+            for step in [0,24,48,72] {
+                draw_line(game,batch,ring(step-1),ring(step+1),rect,UI_ACCENT);
+            }
+        }
     } else {
         for edge in [[x,y,w,thickness],[x,y+h-thickness,w,thickness],
             [x,y+thickness,thickness,h-2.*thickness],[x+w-thickness,y+thickness,thickness,h-2.*thickness]] {
             game.native_fill(batch,edge,color);
+        }
+        if mode == 0 {
+            let len = 5_f32.min(w / 4.);
+            for [cx, cy, dx, dy] in [
+                [x,y,1.,1.], [x+w-1.,y,-1.,1.], [x,y+h-1.,1.,-1.], [x+w-1.,y+h-1.,-1.,-1.],
+            ] {
+                game.native_fill(batch,[cx.min(cx+dx*(len-1.)),cy,len,1.],UI_ACCENT);
+                game.native_fill(batch,[cx,cy.min(cy+dy*(len-1.)),1.,len],UI_ACCENT);
+            }
         }
     }
 }
@@ -6454,11 +6538,10 @@ fn information_lines(game: &Game<'_>, state: &State, menu: Menu, width: f32) -> 
     wrapped
 }
 fn draw_information(game: &Game<'_>, batch: &mut HudBatch, state: &State, menu: Menu) {
-    game.native_fill(batch, [0.0, 0.0, batch.width, batch.height], 0x98000000);
+    game.native_fill(batch, [0., 0., batch.width, batch.height], UI_SCRIM);
     let rect = information_rect(batch.width, batch.height);
     ui_panel(game, batch, rect);
-    game.map_text(
-        batch,
+    ui_heading(game, batch, rect,
         tr(
             "Chunk / region",
             "Чанк / регион",
@@ -6466,9 +6549,6 @@ fn draw_information(game: &Game<'_>, batch: &mut HudBatch, state: &State, menu: 
             "Chunk / región",
             "Chunk / Region",
         ),
-        [rect[0] + 10.0, rect[1] + 8.0],
-        0xffffff,
-        true,
     );
     let lines = information_lines(game, state, menu, rect[2] - 24.0);
     let visible = ((rect[3] - 56.0) / 12.0).max(1.0) as usize;
@@ -6482,15 +6562,9 @@ fn draw_information(game: &Game<'_>, batch: &mut HudBatch, state: &State, menu: 
             true,
         );
     }
-    if lines.len() > visible {
-        let area = rect[3] - 56.0;
-        let thumb = area * visible as f32 / lines.len() as f32;
-        let y = rect[1]
-            + 25.0
-            + (area - thumb) * start as f32 / lines.len().saturating_sub(visible).max(1) as f32;
-        game.native_fill(batch, [rect[0] + rect[2] - 7.0, y, 3.0, thumb], 0xffa2b2bf);
-    }
-    button(
+    draw_scroll_indicator(game, batch, [rect[0], rect[1]+24., rect[2], rect[3]-53.],
+        lines.len(), visible, start);
+    ui_button(
         game,
         batch,
         [
@@ -6502,6 +6576,7 @@ fn draw_information(game: &Game<'_>, batch: &mut HudBatch, state: &State, menu: 
         tr("Close", "Закрыть", "Fermer", "Cerrar", "Schließen"),
         game.cursor(),
         true,
+        ButtonStyle::Primary,
     );
 }
 
@@ -6572,22 +6647,22 @@ fn map_panel_rows(height: f32) -> usize {
 
 fn map_panel_rect(width: f32, height: f32) -> [f32; 4] {
     let w = (width * 0.52).clamp(1., 228.);
-    let body = 20. * map_panel_rows(height) as f32 + 102.;
+    let body = 20. * map_panel_rows(height) as f32 + 109.;
     [width - w - 8., (height - 34. - body).max(36.), w, body]
 }
 
 fn map_panel_row(panel: [f32; 4], index: usize) -> [f32; 4] {
-    [panel[0] + 5., panel[1] + 78. + 20. * index as f32, (panel[2] - 10.).max(1.), 18.]
+    [panel[0] + 5., panel[1] + 85. + 20. * index as f32, (panel[2] - 10.).max(1.), 18.]
 }
 
 fn map_panel_fields(panel: [f32; 4]) -> [[f32; 4]; 4] {
     let [x, y, w, _] = panel;
     let half = (w - 14.) * 0.5;
     [
-        [x + 5., y + 20., w - 10., 17.],
-        [x + 5., y + 39., w - 10., 17.],
-        [x + 5., y + 58., half, 17.],
-        [x + 9. + half, y + 58., half, 17.],
+        [x + 5., y + 27., w - 10., 17.],
+        [x + 5., y + 46., w - 10., 17.],
+        [x + 5., y + 65., half, 17.],
+        [x + 9. + half, y + 65., half, 17.],
     ]
 }
 
@@ -6635,10 +6710,31 @@ fn setting_tabs() -> [&'static str; SETTING_CATEGORIES] {
     ]
 }
 
-fn settings_catalog<'a>(game: &'a Game<'_>, category: usize) -> impl Iterator<Item=&'a horizon_client::mod_list::NativeSetting> {
+fn settings_catalog<'a>(game: &'a Game<'_>) -> impl Iterator<Item=&'a horizon_client::mod_list::NativeSetting> {
     game.settings.mods.installed.iter().find(|m|m.id==runtime::MOD_ID)
         .and_then(|m|m.native.as_ref()).into_iter()
-        .flat_map(|page|page.settings.iter()).filter(move |row| setting_category(&row.key)==category)
+        .flat_map(|page|page.settings.iter())
+}
+
+fn setting_label(game: &Game<'_>, setting: &horizon_client::mod_list::NativeSetting) -> String {
+    game.translate(&setting.label).unwrap_or_else(|| setting.key.replace('_', " "))
+}
+
+fn settings_entries<'a, 'game>(
+    game: &'a Game<'game>, state: &State,
+) -> impl Iterator<Item=&'a horizon_client::mod_list::NativeSetting> + use<'a, 'game> {
+    let query = state.settings_search.trim().to_lowercase();
+    let category = state.settings_tab;
+    settings_catalog(game).filter(move |row| {
+        if query.is_empty() {
+            return setting_category(&row.key) == category;
+        }
+        let label = setting_label(game, row).to_lowercase();
+        let group = setting_tabs()[setting_category(&row.key)].to_lowercase();
+        query.split_whitespace().all(|word| {
+            label.contains(word) || row.key.contains(word) || group.contains(word)
+        })
+    })
 }
 
 pub(super) fn settings_panel(w: f32, h: f32) -> [f32;4] {
@@ -6656,17 +6752,46 @@ fn settings_columns(panel: [f32; 4]) -> usize {
     if panel[2] >= 570. { 2 } else { 1 }
 }
 
-fn settings_rows(panel: [f32; 4]) -> usize {
-    (((panel[3] - 98.) / 24.).floor() as usize).max(1) * settings_columns(panel)
+fn settings_search_controls(panel: [f32; 4], has_text: bool) -> ([f32; 4], [f32; 4]) {
+    let [x, y, w, _] = panel;
+    let inset = if has_text {48.} else {22.};
+    let field = [x+10., y+54., w-inset, 19.];
+    (field, [x+w-34., y+54., 22., 19.])
 }
 
-fn settings_row(panel: [f32; 4], i: usize) -> ([f32; 4], [f32; 4]) {
+fn settings_rows(panel: [f32; 4], searching: bool) -> usize {
+    let pitch = if searching { 31. } else { 24. };
+    (((panel[3] - 122.) / pitch).floor() as usize).max(1) * settings_columns(panel)
+}
+
+fn settings_row(panel: [f32; 4], i: usize, searching: bool) -> ([f32; 4], [f32; 4]) {
     let cols = settings_columns(panel);
+    let pitch = if searching { 31. } else { 24. };
     let w = (panel[2] - 24. - 6. * (cols - 1) as f32) / cols as f32;
     let row = [panel[0] + 10. + (w + 6.) * (i % cols) as f32,
-        panel[1] + 56. + 24. * (i / cols) as f32, w, 21.];
+        panel[1] + 79. + pitch * (i / cols) as f32, w, pitch-3.];
     let control = (row[2] * 0.36).clamp(1., 200.);
-    (row, [row[0] + row[2] - control, row[1], control, row[3]])
+    (row, [row[0]+row[2]-control, row[1]+if searching { 3. } else {0.}, control, 21.])
+}
+
+fn focus_settings_search(state: &mut State, focus: bool) {
+    state.settings_search_focus = focus;
+    runtime::set_text_input(focus);
+}
+
+fn settings_query_changed(state: &mut State) {
+    state.settings_slider = None;
+    state.settings_scroll = 0;
+}
+
+fn append_settings_query(state: &mut State, input: impl Iterator<Item=char>) {
+    for c in input.filter(|c| !c.is_control()) {
+        if state.settings_search.len() + c.len_utf8() > 128 {
+            break;
+        }
+        state.settings_search.push(c);
+    }
+    settings_query_changed(state);
 }
 
 fn settings_back(panel:[f32;4])->[f32;4] {
@@ -6734,20 +6859,25 @@ fn placement_buttons(viewport: [f32; 2]) -> [[f32; 4]; 3] {
 fn draw_placement(game: &Game<'_>, batch: &mut HudBatch, state: &State, edit: PlacementEdit) {
     let viewport = [batch.width, batch.height];
     let (settings, size, span) = placement_size(game, state, viewport);
-    game.native_fill(batch, [0., 0., batch.width, batch.height], 0xb710171e);
+    game.native_fill(batch, [0., 0., batch.width, batch.height], 0x7409131e);
     let rect = [edit.position[0] * span[0], edit.position[1] * span[1], size, size];
     draw(game, batch, state, rect, false, None);
     draw_minimap_frame(game, batch, rect, settings.round);
     let hint = tr("Drag the minimap or use the arrow keys", "Перетащи мини-карту или используй стрелки",
         "Déplacez la minicarte ou utilisez les flèches", "Arrastra el minimapa o usa las flechas",
         "Minikarte ziehen oder Pfeiltasten verwenden");
-    game.map_text(batch, &fit_text(game, hint, batch.width - 16.), [8., 8.], 0xfff0f5f8, true);
-    for (rect, label) in placement_buttons(viewport).into_iter().zip([
+    let hint = fit_text(game, hint, batch.width - 26.);
+    let hint_width = game.map_text_width(&hint) + 16.;
+    let hint_x = ((batch.width - hint_width) * 0.5).floor();
+    ui_panel(game, batch, [hint_x, 6., hint_width, 20.]);
+    game.map_text(batch, &hint, [hint_x+8., 12.], UI_TEXT, false);
+    for (i, (rect, label)) in placement_buttons(viewport).into_iter().zip([
         tr("Save", "Сохранить", "Enregistrer", "Guardar", "Speichern"),
         tr("Use corner", "В угол", "Utiliser le coin", "Usar esquina", "Ecke verwenden"),
         tr("Cancel", "Отмена", "Annuler", "Cancelar", "Abbrechen"),
-    ]) {
-        button(game, batch, rect, &fit_text(game, label, rect[2] - 6.), game.cursor(), true);
+    ]).enumerate() {
+        ui_button(game, batch, rect, label, game.cursor(), true,
+            if i == 0 { ButtonStyle::Primary } else { ButtonStyle::Plain });
     }
 }
 
@@ -6794,40 +6924,69 @@ fn draw_settings(game: &Game<'_>, batch: &mut HudBatch, state: &State) {
     }
     let panel=settings_panel(batch.width,batch.height);
     let mouse=game.cursor();
-    game.native_fill(batch,[0.,0.,batch.width,batch.height],0x80110e0f);
+    game.native_fill(batch,[0.,0.,batch.width,batch.height],UI_SCRIM);
     ui_panel(game, batch, panel);
     let title = tr("Map settings","Настройки карты","Paramètres des cartes","Ajustes del mapa","Karteneinstellungen");
-    game.map_text(batch, title, [((batch.width-game.map_text_width(title))*0.5).floor(),panel[1]+10.],0xfffff3e7,true);
+    ui_heading(game, batch, panel, title);
+    let searching = !state.settings_search.trim().is_empty();
     for (i,name) in setting_tabs().into_iter().enumerate() {
         let rect=settings_tab(panel,i);
-        button(game,batch,rect,&fit_text(game,name,rect[2]-6.),mouse,true);
-        if state.settings_tab==i {
-            game.native_fill(batch,[rect[0]+2.,rect[1]+rect[3]-3.,rect[2]-4.,1.],UI_ACCENT);
-        }
+        ui_button(game,batch,rect,name,mouse,true,
+            if !searching && state.settings_tab==i {ButtonStyle::Current} else {ButtonStyle::Plain});
     }
-    let total=settings_catalog(game,state.settings_tab).count();
-    let count=settings_rows(panel);
+    let has_text = !state.settings_search.is_empty();
+    let (field, clear) = settings_search_controls(panel, has_text);
+    let search_hint = tr("Search all settings", "Поиск по всем настройкам", "Rechercher un réglage", 
+        "Buscar en los ajustes", "Alle Einstellungen durchsuchen");
+    let text = if has_text { &state.settings_search } else { search_hint };
+    ui_field(game, batch, field, state.settings_search_focus);
+    game.map_text(batch, &fit_text(game,text,field[2]-15.), [field[0]+7.,field[1]+6.],
+        if has_text {UI_TEXT} else {UI_MUTED}, false);
+    if has_text {
+        button(game, batch, clear, "×", mouse, true);
+    }
+    let entries: Vec<_> = settings_entries(game,state).collect();
+    let total=entries.len();
+    let count=settings_rows(panel,searching);
     let start=state.settings_scroll.min(total.saturating_sub(count));
-    let mut tooltip = None;
-    for (i,setting) in settings_catalog(game,state.settings_tab).skip(start).take(count).enumerate() {
+    let mut tooltip = (has_text && inside(mouse, clear)).then(|| tr("Clear search", "Очистить поиск", 
+        "Effacer la recherche", "Borrar búsqueda", "Suche leeren").to_owned());
+    if searching && total == 0 {
+        let prompt = tr("No matching settings", "Настройки не найдены", "Aucun réglage trouvé",
+            "No hay ajustes coincidentes", "Keine passenden Einstellungen");
+        game.map_text(batch, &fit_text(game,prompt,panel[2]-24.), [panel[0]+11.,panel[1]+88.],UI_MUTED,false);
+    }
+    for (i,setting) in entries.into_iter().skip(start).take(count).enumerate() {
         use horizon_client::mod_list::NativeSettingValue as Value;
-        let (row,control)=settings_row(panel,i);
-        button(game, batch, row, "", mouse, true);
-        let label=game.translate(&setting.label).unwrap_or_else(||setting.key.replace('_'," "));
+        let (row,control)=settings_row(panel,i,searching);
+        let [x,y,w,h] = row;
+        game.native_fill(batch, row, if inside(mouse,row) {UI_HOVER} else {UI_ROW});
+        game.native_fill(batch, [x,y+h-1.,w,1.], UI_EDGE);
+        let label=setting_label(game,setting);
         let left = fit_text(game,&label,control[0]-row[0]-10.);
-        game.map_text(batch,&left,[row[0]+6.,row[1]+6.],0xfff4e9dd,false);
+        game.map_text(batch,&left,[row[0]+6.,row[1]+6.],UI_TEXT,false);
+        if searching {
+            game.map_text(batch, &fit_text(game,setting_tabs()[setting_category(&setting.key)],control[0]-row[0]-10.),
+                [row[0]+6.,row[1]+17.], UI_MUTED, false);
+        }
         let value = if setting.key == "world_cave_y" && game.map_number("world_cave_y") == Some(320.) {
             tr("Same as minimap", "Как на миникарте", "Comme la mini-carte", "Como en el minimapa", "Wie Minikarte").to_owned()
         } else {
             setting_value(game,&setting.value)
         };
         let right = fit_text(game, &value, control[2] - if matches!(setting.value, Value::Color(_)) { 24. } else { 8. });
-        let value_color = if matches!(setting.value, Value::Toggle(false)) { 0xffbeafa4 } else { UI_ACCENT };
-        game.map_text(batch, &right, [control[0]+control[2]-game.map_text_width(&right)-6.,row[1]+6.], value_color, false);
+        let value_x = control[0]+control[2]-game.map_text_width(&right)-6.;
+        if let Value::Toggle(on) = setting.value {
+            let badge = [value_x-4., control[1]+3., game.map_text_width(&right)+8., 14.];
+            panel_shape(game, batch, badge, if on {UI_SELECTED} else {UI_INPUT}, if on {UI_ACCENT} else {UI_EDGE});
+        }
+        let value_color = if matches!(setting.value, Value::Toggle(false)) { UI_MUTED } else { UI_ACCENT };
+        game.map_text(batch, &right, [value_x,control[1]+6.], value_color, false);
         if matches!(setting.value,Value::Range {..}) {
             let filled=(control[2]-8.)*setting.value.fraction();
-            game.native_fill(batch,[control[0]+4.,control[1]+16.,control[2]-8.,2.],0xff726056);
+            game.native_fill(batch,[control[0]+4.,control[1]+16.,control[2]-8.,2.],UI_INPUT);
             game.native_fill(batch,[control[0]+4.,control[1]+16.,filled,2.],UI_ACCENT);
+            game.native_fill(batch,[control[0]+3.+filled,control[1]+15.,3.,4.],UI_TEXT);
         }
         if let Value::Color(rgb)=setting.value {
             game.native_fill(batch,[control[0]+5.,control[1]+6.,10.,10.],waypoint_argb(rgb));
@@ -6836,8 +6995,8 @@ fn draw_settings(game: &Game<'_>, batch: &mut HudBatch, state: &State) {
             tooltip = Some(format!("{label} · {value}"));
         }
     }
-    draw_scroll_indicator(game, batch, [panel[0], panel[1]+54., panel[2], panel[3]-93.], total, count, start);
-    if matches!(state.settings_tab, 0 | 3) {
+    draw_scroll_indicator(game, batch, [panel[0], panel[1]+77., panel[2], panel[3]-116.], total, count, start);
+    if !searching && matches!(state.settings_tab, 0 | 3) {
         let rect = settings_action(panel);
         let label = if state.settings_tab == 0 {
             tr("Change position", "Положение на экране", "Changer la position",
@@ -6848,7 +7007,7 @@ fn draw_settings(game: &Game<'_>, batch: &mut HudBatch, state: &State) {
         };
         button(game, batch, rect, &fit_text(game, label, rect[2] - 6.), mouse, true);
     }
-    button(game,batch,settings_back(panel),tr("Done","Готово","Terminé","Listo","Fertig"),mouse,true);
+    ui_button(game,batch,settings_back(panel),tr("Done","Готово","Terminé","Listo","Fertig"),mouse,true,ButtonStyle::Primary);
     if let Some(label) = tooltip { draw_tooltip(game, batch, &label, mouse); }
     draw_notice(game, batch, state);
 }
@@ -6859,6 +7018,8 @@ fn open_settings(state:&mut State, back:Option<Mode>, tab:usize) {
     state.radar_editor=None;
     state.settings_tab=tab;
     state.settings_scroll=0;
+    state.settings_search.clear();
+    state.settings_search_focus=false;
     state.settings_slider=None;
     state.map_panel=MapPanel::None;
     state.waypoint_search_focus=false;
@@ -6870,6 +7031,7 @@ fn open_settings(state:&mut State, back:Option<Mode>, tab:usize) {
 }
 
 fn close_settings(state:&mut State) {
+    focus_settings_search(state, false);
     if let Some(mode)=state.settings_return.take() {state.mode=mode;} else {state.close=true;}
 }
 
@@ -6894,8 +7056,21 @@ fn settings_press(game:&Game<'_>, state:&mut State, screen:&mod_api::ScreenView<
     if !matches!(button,0|1) {return;}
     let panel=settings_panel(screen.rect[2],screen.rect[3]);
     let mouse=screen.mouse;
+    let has_text = !state.settings_search.is_empty();
+    let (search, clear) = settings_search_controls(panel, has_text);
+    if button == 0 {
+        if has_text && inside(mouse,clear) {
+            state.settings_search.clear();
+            settings_query_changed(state);
+            focus_settings_search(state,true);
+            return;
+        }
+        focus_settings_search(state,inside(mouse,search));
+        if state.settings_search_focus {return;}
+    }
     if button==0 && inside(mouse,settings_back(panel)) {close_settings(state);return;}
-    if button == 0 && state.settings_tab == 3 && inside(mouse, settings_action(panel)) {
+    let searching = !state.settings_search.trim().is_empty();
+    if !searching && button == 0 && state.settings_tab == 3 && inside(mouse, settings_action(panel)) {
         match super::minimap_radar_editor::Editor::open(
             &game.native_data_dir(runtime::MOD_ID), state.xaero_profile.as_deref(),
         ) {
@@ -6904,7 +7079,7 @@ fn settings_press(game:&Game<'_>, state:&mut State, screen:&mod_api::ScreenView<
         }
         return;
     }
-    if button == 0 && state.settings_tab == 0 && inside(mouse, settings_action(panel)) {
+    if !searching && button == 0 && state.settings_tab == 0 && inside(mouse, settings_action(panel)) {
         let viewport = [screen.rect[2], screen.rect[3]];
         let (settings, _, span) = placement_size(game, state, viewport);
         use runtime::minimap::Corner::*;
@@ -6917,17 +7092,19 @@ fn settings_press(game:&Game<'_>, state:&mut State, screen:&mod_api::ScreenView<
     }
     if button==0 && let Some(i)=(0..SETTING_CATEGORIES).find(|i|inside(mouse,settings_tab(panel,*i))) {
         state.settings_tab=i;
-        state.settings_scroll=0;
+        state.settings_search.clear();
+        settings_query_changed(state);
         return;
     }
-    let total=settings_catalog(game,state.settings_tab).count();
-    let count=settings_rows(panel);
+    let entries: Vec<_> = settings_entries(game,state).collect();
+    let total=entries.len();
+    let count=settings_rows(panel,searching);
     let start=state.settings_scroll.min(total.saturating_sub(count));
-    let Some((i,row))=settings_catalog(game,state.settings_tab).skip(start).take(count)
-        .enumerate().find(|(i,_)|inside(mouse,settings_row(panel,*i).0))
+    let Some((i,row))=entries.into_iter().skip(start).take(count)
+        .enumerate().find(|(i,_)|inside(mouse,settings_row(panel,*i,searching).0))
     else {return;};
     use horizon_client::mod_list::NativeSettingValue as Value;
-    let (_,control)=settings_row(panel,i);
+    let (_,control)=settings_row(panel,i,searching);
     let mut next=row.value.clone();
     match &mut next {
         Value::Range {..} => {
@@ -6983,9 +7160,10 @@ fn draw_map_tools(game: &Game<'_>, batch: &mut HudBatch, state: &State, mouse: [
             || i == 6 && cache_attention;
         let enabled = i != 4 || latest_death(state).is_some();
         let hover = inside(mouse, rect);
-        button(game, batch, rect, "", mouse, enabled);
+        ui_button(game, batch, rect, "", mouse, enabled,
+            if active { ButtonStyle::Current } else { ButtonStyle::Plain });
         if hover { tooltip = Some(labels[i]); }
-        let color = if !enabled { 0xff8a817b } else if active || hover { UI_ACCENT } else { 0xfff4e9dd };
+        let color = if !enabled { UI_MUTED } else if active || hover { UI_ACCENT } else { UI_TEXT };
         for (y, bits) in icons[i].into_iter().enumerate() {
             for x in 0..7 {
                 if bits & (1 << (6-x)) != 0 {
@@ -7004,21 +7182,19 @@ fn draw_map_tools(game: &Game<'_>, batch: &mut HudBatch, state: &State, mouse: [
         MapPanel::ServerWorlds => labels[5],
     };
     ui_panel(game, batch, panel);
-    game.map_text(batch,title,[panel[0]+7.,panel[1]+7.],0xffe6f0f4,true);
+    ui_heading(game, batch, panel, title);
     if state.map_panel == MapPanel::ServerWorlds {
         draw_server_worlds(game, batch, state, panel, mouse);
         if let Some(label) = tooltip { draw_tooltip(game, batch, label, mouse); }
         return;
     }
     let [search, group, all, hidden] = map_panel_fields(panel);
-    ui_panel(game, batch, search);
-    if state.waypoint_search_focus {
-        game.native_fill(batch, [search[0]+1., search[1]+1., search[2]-2., 1.], UI_ACCENT);
-    }
+    ui_field(game, batch, search, state.waypoint_search_focus);
     let value = if state.waypoint_search.is_empty() {
         tr("Search waypoints…","Поиск метки…","Rechercher un repère…","Buscar marcador…","Wegpunkt suchen…")
     } else { &state.waypoint_search };
-    game.map_text(batch, &fit_text(game, value, search[2]-10.), [search[0]+5., search[1]+5.], 0xffeaf1f6, false);
+    game.map_text(batch, &fit_text(game, value, search[2]-10.), [search[0]+5., search[1]+5.],
+        if state.waypoint_search.is_empty() {UI_MUTED} else {UI_TEXT}, false);
     let group_name = format!("{} ›", group_label(state.waypoint_group.as_deref()));
     for (rect, label, active) in [
         (group, group_name.as_str(), false),
@@ -7027,37 +7203,37 @@ fn draw_map_tools(game: &Game<'_>, batch: &mut HudBatch, state: &State, mouse: [
         (hidden, tr("Show disabled","Показать скрытые","Voir les repères inactifs","Ver desactivados","Inaktive anzeigen"),
             show_hidden_on_map(game, true)),
     ] {
-        button(game,batch,rect,&fit_text(game,label,rect[2]-6.),mouse,true);
-        if active { game.native_fill(batch,[rect[0]+2.,rect[1]+rect[3]-3.,rect[2]-4.,1.],UI_ACCENT); }
+        ui_button(game,batch,rect,label,mouse,true,
+            if active { ButtonStyle::Current } else { ButtonStyle::Plain });
     }
     let count = map_panel_rows(batch.height);
     let (visible, total) = visible_map_panel_waypoints(game, state, batch.height);
     for (i, waypoint) in visible.iter().enumerate() {
         let row=map_panel_row(panel,i);
-        game.native_fill(batch,row,if inside(mouse,row) {UI_HOVER} else {0xff322e2e});
+        game.native_fill(batch,row,if inside(mouse,row) {UI_HOVER} else {UI_ROW});
         game.native_fill(batch,[row[0]+4.,row[1]+5.,8.,8.],waypoint_argb(waypoint.color));
         let name=fit_text(game,&waypoint.name,row[2]-20.);
         game.map_text(batch,&name,[row[0]+17.,row[1]+5.],
-            if waypoint.options.disabled {0xff9daab4} else {0xffeef5f8},true);
+            if waypoint.options.disabled {UI_MUTED} else {UI_TEXT},false);
         if inside(mouse,row)
             && let Some(frame) = state.frame.as_ref().filter(|f| f.view.large && f.view.dimension == waypoint.dimension)
         {
             let rect = rectangle(batch.width,batch.height);
             let at = world_screen(&frame.view,rect,[f64::from(waypoint.x)+0.5,f64::from(waypoint.z)+0.5]);
             if inside(at,rect) && !inside(at,panel) {
-                game.native_fill(batch,[at[0]-14.,at[1]-1.,6.,2.],0xff6ce1d5);
-                game.native_fill(batch,[at[0]+8.,at[1]-1.,6.,2.],0xff6ce1d5);
+                game.native_fill(batch,[at[0]-14.,at[1]-1.,6.,2.],UI_ACCENT);
+                game.native_fill(batch,[at[0]+8.,at[1]-1.,6.,2.],UI_ACCENT);
             }
         }
     }
     if visible.is_empty() {
         game.map_text(batch,tr("No matching waypoints","Нет подходящих меток","Aucun repère trouvé",
             "No hay marcadores coincidentes","Keine passenden Wegpunkte"),
-            [panel[0]+8.,panel[1]+83.],0xffb4c6d2,true);
+            [panel[0]+8.,panel[1]+90.],UI_MUTED,false);
     }
     let row = map_panel_row(panel,count);
-    button(game,batch,row,tr("Manage waypoints…","Управление метками…","Gérer les repères…","Gestionar marcadores…","Wegpunkte verwalten…"),mouse,true);
-    draw_scroll_indicator(game, batch, [panel[0], panel[1]+76., panel[2], count as f32 * 20.],
+    ui_button(game,batch,row,tr("Manage waypoints…","Управление метками…","Gérer les repères…","Gestionar marcadores…","Wegpunkte verwalten…"),mouse,true,ButtonStyle::Primary);
+    draw_scroll_indicator(game, batch, [panel[0], panel[1]+83., panel[2], count as f32 * 20.],
         total, count, state.map_panel_scroll);
     if let Some(label) = tooltip { draw_tooltip(game, batch, label, mouse); }
 }
@@ -7071,22 +7247,19 @@ fn draw_server_worlds(game: &Game<'_>, batch: &mut HudBatch, state: &State, pane
     let [name_field, create, _, _] = map_panel_fields(panel);
     let prompt = tr("New world name…", "Имя нового мира…", "Nom du nouveau monde…", "Nombre del nuevo mundo…", "Neuer Weltname…");
     let name = if state.server_world_name.is_empty() { prompt } else { &state.server_world_name };
-    ui_panel(game, batch, name_field);
-    if state.server_world_focus {
-        game.native_fill(batch, [name_field[0]+1., name_field[1]+1., name_field[2]-2., 1.], UI_ACCENT);
-    }
-    game.map_text(batch, &fit_text(game, name, name_field[2] - 10.), [name_field[0] + 5., name_field[1] + 5.], 0xffeaf1f6, false);
-    button(game, batch, create, tr("Create", "Создать", "Créer", "Crear", "Anlegen"), mouse, !state.server_world_name.trim().is_empty());
+    ui_field(game, batch, name_field, state.server_world_focus);
+    game.map_text(batch, &fit_text(game, name, name_field[2] - 10.), [name_field[0] + 5., name_field[1] + 5.], UI_TEXT, false);
+    ui_button(game, batch, create, tr("Create", "Создать", "Créer", "Crear", "Anlegen"), mouse, !state.server_world_name.trim().is_empty(), ButtonStyle::Primary);
     let default_label = tr("Default", "По умолчанию", "Par défaut", "Predeterminado", "Standard");
     for (i, name) in server_world_rows(&names, state.map_panel_scroll, map_panel_rows(batch.height)).enumerate() {
         let row = map_panel_row(panel, i);
         let active = name == active.as_deref();
         let text = fit_text(game, name.unwrap_or(default_label), row[2] - 14.);
-        button(game, batch, row, &text, mouse, true);
-        if active { game.native_fill(batch, [row[0]+2., row[1]+2., 2., row[3]-4.], UI_ACCENT); }
+        ui_button(game, batch, row, &text, mouse, true,
+            if active { ButtonStyle::Current } else { ButtonStyle::Plain });
     }
     let count = map_panel_rows(batch.height);
-    draw_scroll_indicator(game, batch, [panel[0], panel[1]+76., panel[2], count as f32 * 20.],
+    draw_scroll_indicator(game, batch, [panel[0], panel[1]+83., panel[2], count as f32 * 20.],
         names.len() + 1, count, state.map_panel_scroll);
 }
 
@@ -7224,9 +7397,15 @@ fn map_footer(width: f32, height: f32, panel_open: bool) -> [f32; 4] {
         let panel = map_panel_rect(width, height);
         return [8., height - 70., (panel[0] - 12.).max(1.), 34.];
     }
-    let w = (width - if width < 544. { 16. } else { 280. }).clamp(1., 500.);
+    let mut w = (width - if width < 544. { 16. } else { 280. }).clamp(1., 500.);
     let offset = if width < 544. { 70. } else { 42. };
-    [((width - w) * 0.5).floor(), (height - offset).max(0.), w, 34.]
+    let mut x = ((width - w) * 0.5).floor();
+    if panel_open {
+        let panel_left = map_panel_rect(width, height)[0] - 4.;
+        w = w.min((panel_left - 138.).max(1.));
+        x = x.min(panel_left - w);
+    }
+    [x, (height - offset).max(0.), w, 34.]
 }
 fn world_zoom_buttons(width:f32) -> [[f32;4];2] {
     [[width - 30., 34., 22., 22.], [width - 30., 8., 22., 22.]]
@@ -7377,24 +7556,25 @@ fn draw_map_screen(game: &Game<'_>, batch: &mut HudBatch, state: &State) {
     let settings = runtime::initialize(game.native_data_dir(runtime::MOD_ID)).settings();
     for (i, dimension) in Dimension::ALL.into_iter().enumerate() {
         let tab = tab(batch.width, i);
-        button(game, batch, tab, "", mouse, true);
-        if dimension == settings.world_dimension {
-            game.native_fill(batch, [tab[0]+2.,tab[1]+tab[3]-3.,tab[2]-4.,1.], UI_ACCENT);
+        let active = dimension == settings.world_dimension;
+        ui_button(game,batch,tab,"",mouse,true,
+            if active { ButtonStyle::Current } else { ButtonStyle::Plain });
+        let name = dimension.label();
+        let label = fit_text(game, name, tab[2] - 28.);
+        let compact = tab[2] < 59.;
+        let icon_x = tab[0] + if compact { ((tab[2]-16.)/2.).floor() } else { 5. };
+        dimension_icon(game, batch, dimension, [icon_x, tab[1]+4.]);
+        if !compact {
+            game.map_text(batch,&label,[tab[0]+25.,tab[1]+8.],if active {UI_ACCENT} else {UI_TEXT},false);
         }
-        dimension_icon(game, batch, dimension, [tab[0] + 4.0, tab[1] + 4.0]);
-        game.map_text(
-            batch,
-            &fit_text(game, dimension.label(), tab[2] - 28.),
-            [tab[0] + 24.0, tab[1] + 8.0],
-            0xffffff,
-            true,
-        );
+        if (compact || label != name) && inside(mouse, tab) { tooltip = Some(name.to_owned()); }
     }
     let footer = map_footer(batch.width, batch.height, state.map_panel != MapPanel::None);
     ui_panel(game, batch, footer);
+    game.native_fill(batch,[footer[0]+4.,footer[1]+16.,footer[2]-8.,1.],UI_EDGE);
     if game.map_option("map_show_coordinates")!=Some(0) {
         let coordinates=fit_text(game,&format!("{coordinates}   {nether}"),footer[2]-12.);
-        game.map_text(batch,&coordinates,[footer[0]+((footer[2]-game.map_text_width(&coordinates))/2.).floor(),footer[1]+5.],0xffffff,true);
+        game.map_text(batch,&coordinates,[footer[0]+6.,footer[1]+5.],UI_TEXT,false);
     }
     let show_biome=game.map_option("world_hover_biome")!=Some(0);
     if show_biome {biome_icon(game,batch,biome.as_deref(),[footer[0]+6.,footer[1]+18.]);}
@@ -7428,8 +7608,8 @@ fn draw_map_screen(game: &Game<'_>, batch: &mut HudBatch, state: &State) {
         batch,
         &fit_text(game, &label, footer[2] - if game.map_option("world_zoom_readout")==Some(1) { 82. } else { 32. }),
         [footer[0] + 26.0, footer[1] + 21.0],
-        if lod_warning { 0xffffd45c } else { 0xffffff },
-        true,
+        if lod_warning { UI_WARNING } else { UI_MUTED },
+        false,
     );
     if let Some(tooltip) = tooltip
         && state.info.is_none()
@@ -7455,11 +7635,18 @@ fn cache_rows(height: f32) -> usize {
     (((height - 122.).max(0.) / 48.) as usize).clamp(1, 16)
 }
 fn cache_row(width: f32, index: usize) -> [f32; 4] {
-    [12., 42. + index as f32 * 48., (width - 24.).max(1.), 46.]
+    let [x,w] = work_area(width);
+    [x + 8., 44. + index as f32 * 48., w - 16., 45.]
 }
-fn cache_footer(width: f32, height: f32, index: usize) -> [f32; 4] {
-    let w = ((width - 32.) / 3.).max(1.);
-    [12. + index as f32 * (w + 4.), height - 55., w, 18.]
+fn cache_footer(width: f32, height: f32) -> [[f32; 4]; 2] {
+    let w = ((width - 44.) / 2.).clamp(1., 132.);
+    let x = (width * 0.5).floor();
+    [[x - w - 4., height - 53., w, 20.], [x + 4., height - 53., w, 20.]]
+}
+
+fn cache_refresh(width: f32) -> [f32; 4] {
+    let [x,w] = work_area(width);
+    [x + w - 86., 9., 78., 18.]
 }
 fn cache_status(status: &runtime::container::Compatibility) -> &'static str {
     use runtime::container::Compatibility::*;
@@ -7691,9 +7878,11 @@ fn draw_cache_screen(game: &Game<'_>, batch: &mut HudBatch, state: &State) {
     let snapshot = runtime::initialize(game.native_data_dir(runtime::MOD_ID))
         .caches
         .snapshot();
-    game.native_fill(batch, [0., 0., batch.width, batch.height], 0xf01d1a1a);
-    game.map_text(
-        batch,
+    let [x,w] = work_area(batch.width);
+    let panel = [x, 5., w, batch.height-10.];
+    game.native_fill(batch, [0., 0., batch.width, batch.height], UI_SCRIM);
+    ui_panel(game, batch, panel);
+    ui_heading(game, batch, panel,
         tr(
             "Map caches",
             "Кеши карт",
@@ -7701,14 +7890,11 @@ fn draw_cache_screen(game: &Game<'_>, batch: &mut HudBatch, state: &State) {
             "Cachés de mapas",
             "Karten-Caches",
         ),
-        [12., 14.],
-        0xffffff,
-        true,
     );
     button(
         game,
         batch,
-        [batch.width - 92., 10., 80., 18.],
+        cache_refresh(batch.width),
         tr(
             "Refresh",
             "Обновить",
@@ -7725,6 +7911,7 @@ fn draw_cache_screen(game: &Game<'_>, batch: &mut HudBatch, state: &State) {
             .len()
             .saturating_sub(cache_rows(batch.height)),
     );
+    let mask = game.map_option("hide_world_names").unwrap_or(0);
     for (i, entry) in snapshot
         .entries
         .iter()
@@ -7733,15 +7920,9 @@ fn draw_cache_screen(game: &Game<'_>, batch: &mut HudBatch, state: &State) {
         .enumerate()
     {
         let row = cache_row(batch.width, i);
-        game.native_fill(
-            batch,
-            row,
-            if state.caches.selected.as_ref() == Some(&entry.file) {
-                UI_SELECTED
-            } else {
-                0xff302c2c
-            },
-        );
+        let selected = state.caches.selected.as_ref() == Some(&entry.file);
+        panel_shape(game,batch,row,if selected {UI_SELECTED} else if inside(game.cursor(),row) {UI_HOVER} else {UI_ROW},
+            if selected {UI_ACCENT} else {UI_EDGE});
         let server = entry.world.as_deref().is_some_and(|world| world.starts_with("server:") || world.starts_with("subworld:"));
         if let Some(icon) = state.caches.icons.get(&entry.file) {
             let x = f64::from(row[0] + 6.);
@@ -7757,23 +7938,22 @@ fn draw_cache_screen(game: &Game<'_>, batch: &mut HudBatch, state: &State) {
                 ],
             );
         } else {
-            game.native_fill(batch, [row[0] + 6., row[1] + 6., 32., 32.], 0xff506846);
+            ui_field(game, batch, [row[0] + 6., row[1] + 6., 32., 32.], false);
             game.map_text(
                 batch,
                 if server { "S" } else { "W" },
                 [row[0] + 18., row[1] + 18.],
-                0xffffff,
-                true,
+                UI_MUTED,
+                false,
             );
         }
-        let mask = game.map_option("hide_world_names").unwrap_or(0);
         let hidden = mask >= 2 || (mask == 1 && server);
         let label = if hidden {
             if server { tr("Server", "Сервер", "Serveur", "Servidor", "Server") }
             else { tr("World", "Мир", "Monde", "Mundo", "Welt") }
         } else { &entry.name };
         let title = cache_text(game, label, row[2] - 52.);
-        game.map_text(batch, &title, [row[0] + 44., row[1] + 4.], 0xffffff, false);
+        game.map_text(batch, &title, [row[0] + 44., row[1] + 4.], UI_TEXT, false);
         let size = entry.bytes as f64 / 1048576.;
         let description = if hidden { format!("{size:.2} MiB") } else { format!("{size:.2} MiB · {}", entry.file) };
         let detail = cache_text(game, &description, row[2] - 52.);
@@ -7781,7 +7961,7 @@ fn draw_cache_screen(game: &Game<'_>, batch: &mut HudBatch, state: &State) {
             batch,
             &detail,
             [row[0] + 44., row[1] + 17.],
-            0xbac4d0,
+            UI_MUTED,
             false,
         );
         let label = cache_text(game, cache_status(&entry.compatibility), row[2] - 52.);
@@ -7790,9 +7970,9 @@ fn draw_cache_screen(game: &Game<'_>, batch: &mut HudBatch, state: &State) {
             &label,
             [row[0] + 44., row[1] + 30.],
             if entry.compatibility == runtime::container::Compatibility::Current {
-                0x9fc792
+                UI_ACCENT
             } else {
-                0xffd24a
+                UI_WARNING
             },
             false,
         );
@@ -7807,17 +7987,19 @@ fn draw_cache_screen(game: &Game<'_>, batch: &mut HudBatch, state: &State) {
                 "No hay cachés",
                 "Keine Karten-Caches",
             ),
-            [12., 46.],
-            0xbac4d0,
+            [x + 10., 46.],
+            UI_MUTED,
             false,
         );
     }
+    draw_scroll_indicator(game,batch,[x+5.,43.,w-5.,batch.height-122.],
+        snapshot.entries.len(),cache_rows(batch.height),start);
     let busy = snapshot.loading || state.caches.operation.is_some();
     let selected = snapshot
         .entries
         .iter()
         .find(|e| Some(&e.file) == state.caches.selected.as_ref());
-    if let Some(entry) = selected {
+    if let Some(entry) = selected && mask == 0 {
         let identity = cache_text(
             game,
             &format!(
@@ -7825,9 +8007,9 @@ fn draw_cache_screen(game: &Game<'_>, batch: &mut HudBatch, state: &State) {
                 entry.name,
                 entry.world.as_deref().unwrap_or(&entry.file)
             ),
-            batch.width - 24.,
+            w - 20.,
         );
-        game.map_text(batch, &identity, [12., batch.height - 73.], 0xbac4d0, false);
+        game.map_text(batch, &identity, [x + 10., batch.height - 73.], UI_MUTED, false);
     }
     let can_rebuild = selected.is_some_and(|e| {
         e.world.is_some()
@@ -7837,10 +8019,11 @@ fn draw_cache_screen(game: &Game<'_>, batch: &mut HudBatch, state: &State) {
                     | runtime::container::Compatibility::RebuildImages
             )
     });
-    button(
+    let [rebuild, back] = cache_footer(batch.width, batch.height);
+    ui_button(
         game,
         batch,
-        cache_footer(batch.width, batch.height, 0),
+        rebuild,
         if state.caches.confirm.is_some() {
             tr(
                 "Confirm rebuild",
@@ -7860,28 +8043,16 @@ fn draw_cache_screen(game: &Game<'_>, batch: &mut HudBatch, state: &State) {
         },
         game.cursor(),
         can_rebuild && !busy,
+        if state.caches.confirm.is_some() {ButtonStyle::Confirm} else {ButtonStyle::Plain},
     );
-    button(
+    ui_button(
         game,
         batch,
-        cache_footer(batch.width, batch.height, 1),
-        tr(
-            "Compress: later",
-            "Сжать: позже",
-            "Compresser : plus tard",
-            "Comprimir: después",
-            "Komprimieren: später",
-        ),
-        game.cursor(),
-        false,
-    );
-    button(
-        game,
-        batch,
-        cache_footer(batch.width, batch.height, 2),
+        back,
         tr("Back to map", "К карте", "Carte", "Mapa", "Zur Karte"),
         game.cursor(),
         true,
+        ButtonStyle::Primary,
     );
     let message = state
         .caches
@@ -7906,17 +8077,18 @@ fn draw_cache_screen(game: &Game<'_>, batch: &mut HudBatch, state: &State) {
             )
         } else {
             tr(
-                "Select a cache. Compression and file conversion are not available yet",
-                "Выберите кеш. Сжатие и конвертация файлов пока недоступны",
-                "Sélectionnez un cache. Compression et conversion à venir",
-                "Selecciona una caché. Compresión y conversión pendientes",
-                "Cache auswählen. Komprimierung und Konvertierung folgen",
+                "Select a cache to rebuild its map images",
+                "Выберите кеш, чтобы перестроить изображения карты",
+                "Sélectionnez un cache pour reconstruire ses images",
+                "Elige una caché para reconstruir sus imágenes",
+                "Cache zum Neuaufbau der Kartenbilder auswählen",
             )
         });
-    let message = cache_text(game, message, batch.width - 24.);
-    game.map_text(batch, &message, [12., batch.height - 29.], 0xffd24a, false);
+    let message = cache_text(game, message, w - 20.);
+    let color = if snapshot.error.is_some() || state.caches.confirm.is_some() { UI_WARNING } else { UI_MUTED };
+    game.map_text(batch, &message, [x + 10., batch.height - 27.], color, false);
     if snapshot.truncated {
-        game.map_text(batch, "4096+", [12., batch.height - 15.], 0xffd24a, false);
+        game.map_text(batch, "4096+", [x + 10., batch.height - 15.], UI_WARNING, false);
     }
 }
 fn cache_press(
@@ -7932,10 +8104,8 @@ fn cache_press(
     }
     let controller = runtime::initialize(game.native_data_dir(runtime::MOD_ID));
     let snapshot = controller.caches.snapshot();
-    if inside(
-        screen.mouse,
-        cache_footer(screen.rect[2], screen.rect[3], 2),
-    ) {
+    let [rebuild, back] = cache_footer(screen.rect[2], screen.rect[3]);
+    if inside(screen.mouse, back) {
         state.mode = Mode::Map;
         state.caches.confirm = None;
         return;
@@ -7943,15 +8113,12 @@ fn cache_press(
     if snapshot.loading || state.caches.operation.is_some() {
         return;
     }
-    if inside(screen.mouse, [screen.rect[2] - 92., 10., 80., 18.]) {
+    if inside(screen.mouse, cache_refresh(screen.rect[2])) {
         state.caches.confirm = None;
         refresh_cache_catalog(game);
         return;
     }
-    if inside(
-        screen.mouse,
-        cache_footer(screen.rect[2], screen.rect[3], 0),
-    ) {
+    if inside(screen.mouse, rebuild) {
         if let Some(entry) = snapshot
             .entries
             .iter()
@@ -8285,6 +8452,7 @@ fn edit_waypoint(state: &mut State, key: u64) {
     let Some(waypoint) = state.waypoints.iter().find(|waypoint| waypoint.key() == key) else {
         return;
     };
+    state.waypoint_confirm_delete = false;
     state.name_form = Some(NameForm {
         text: waypoint.name.clone(),
         color: waypoint.color,
@@ -8344,6 +8512,7 @@ fn toggle_waypoint_bulk(state: &mut State) {
 }
 
 fn close_waypoints(state: &mut State) {
+    state.waypoint_share_open = false;
     if state.waypoints_back_to_map {
         state.mode = Mode::Map;
     } else {
@@ -8354,6 +8523,42 @@ fn close_waypoints(state: &mut State) {
 fn select_waypoint_results(game: &Game<'_>, state: &mut State) {
     state.waypoint_bulk = Some(listed_waypoints(game, state).into_iter().map(|(_, point)| point.key()).collect());
     state.waypoint_confirm_delete = false;
+}
+
+fn perform_waypoint_share(game: &Game<'_>, state: &mut State, index: usize) {
+    if index == 2 && let Some(link) = selected_waypoint(state).map(Waypoint::share_link) {
+        if link.encode_utf16().count() <= 256 {
+            state.pending_chat = Some((state.world.clone(), link));
+        } else {
+            state.notice = Some((tr("This link is too long for the chat. Use Copy link.",
+                "Ссылка слишком длинная для чата. Используй «Копировать».",
+                "Ce lien est trop long pour le chat. Utilisez Copier le lien.",
+                "El enlace es demasiado largo para el chat. Usa Copiar enlace.",
+                "Der Link ist zu lang für den Chat. Verwende Link kopieren.").to_owned(), Instant::now()));
+        }
+        return;
+    }
+    if index == 0 && let Some(point) = selected_waypoint(state) {
+        state.pending_copy = Some(point.share_link());
+        state.notice = Some((tr(
+            "Waypoint link copied", "Ссылка на метку скопирована", "Lien du repère copié",
+            "Enlace del marcador copiado", "Wegpunktlink kopiert",
+        ).to_owned(), Instant::now()));
+        return;
+    }
+    if index == 1 {
+        let clipboard = game.clipboard.text();
+        let controller = runtime::initialize(game.native_data_dir(runtime::MOD_ID));
+        let dimension = game.native_player().map_or(Dimension::Overworld, |player| Dimension::from_id(player.dimension));
+        let message = match runtime::receive_shared_waypoint(&clipboard, &state.world, dimension) {
+            Some(point) => match controller.merge_waypoints(&state.world, vec![point]) {
+                Ok(_) => tr("Waypoint imported", "Метка импортирована", "Repère importé", "Marcador importado", "Wegpunkt importiert").to_owned(),
+                Err(error) => error,
+            },
+            None => tr("No waypoint link in clipboard", "В буфере нет ссылки на метку", "Aucun lien de repère dans le presse-papiers", "No hay enlace en el portapapeles", "Kein Wegpunktlink in der Zwischenablage").to_owned(),
+        };
+        state.notice = Some((message, Instant::now()));
+    }
 }
 
 fn waypoint_press(
@@ -8369,6 +8574,7 @@ fn waypoint_press(
         state.waypoint_confirm_delete = false;
         state.waypoint_groups_open = false;
         state.waypoint_group_move = false;
+        state.waypoint_share_open = false;
         *canceled = true;
         return;
     }
@@ -8399,8 +8605,29 @@ fn waypoint_press(
             return;
         }
     }
-    let [rename, delete, show, share, paste, chat] = waypoint_actions(w, h);
-    if !inside(screen.mouse, delete) { state.waypoint_confirm_delete = false; }
+    let actions = waypoint_actions(w, h);
+    if !inside(screen.mouse, actions.delete) { state.waypoint_confirm_delete = false; }
+    if let Some((trigger, _)) = actions.more && inside(screen.mouse, trigger) {
+        state.waypoint_share_open = !state.waypoint_share_open;
+        state.waypoint_search_focus = false;
+        runtime::set_text_input(false);
+        *canceled = true;
+        return;
+    }
+    let was_open = std::mem::take(&mut state.waypoint_share_open);
+    if actions.more.is_none() || was_open {
+        if let Some(index) = actions.share.iter().position(|rect| inside(screen.mouse, *rect)) {
+            state.waypoint_search_focus = false;
+            runtime::set_text_input(false);
+            perform_waypoint_share(game, state, index);
+            *canceled = true;
+            return;
+        }
+        if was_open && actions.more.is_some_and(|(_, menu)| inside(screen.mouse, menu)) {
+            *canceled = true;
+            return;
+        }
+    }
     if let Some(index) = waypoint_bulk_actions(w,h).iter().position(|rect| inside(screen.mouse,*rect))
         && (index == 0 || state.waypoint_bulk.is_some())
     {
@@ -8529,43 +8756,7 @@ fn waypoint_press(
         *canceled = true;
         return;
     }
-    if inside(screen.mouse, chat) && let Some(link) = selected_waypoint(state).map(Waypoint::share_link) {
-        if link.encode_utf16().count() <= 256 {
-            state.pending_chat = Some((state.world.clone(), link));
-        } else {
-            state.notice = Some((tr("This link is too long for the chat. Use Copy link.",
-                "Ссылка слишком длинная для чата. Используй «Копировать».",
-                "Ce lien est trop long pour le chat. Utilisez Copier le lien.",
-                "El enlace es demasiado largo para el chat. Usa Copiar enlace.",
-                "Der Link ist zu lang für den Chat. Verwende Link kopieren.").to_owned(), Instant::now()));
-        }
-        *canceled = true;
-        return;
-    }
-    if inside(screen.mouse, share) && let Some(point) = selected_waypoint(state) {
-        state.pending_copy = Some(point.share_link());
-        state.notice = Some((tr(
-            "Waypoint link copied", "Ссылка на метку скопирована", "Lien du repère copié",
-            "Enlace del marcador copiado", "Wegpunktlink kopiert",
-        ).to_owned(), Instant::now()));
-        *canceled = true;
-        return;
-    }
-    if inside(screen.mouse, paste) {
-        let clipboard = game.clipboard.text();
-        let dimension = game.native_player().map_or(Dimension::Overworld, |player| Dimension::from_id(player.dimension));
-        let message = match runtime::receive_shared_waypoint(&clipboard, &state.world, dimension) {
-            Some(point) => match controller.merge_waypoints(&state.world, vec![point]) {
-                Ok(_) => tr("Waypoint imported", "Метка импортирована", "Repère importé", "Marcador importado", "Wegpunkt importiert").to_owned(),
-                Err(error) => error,
-            },
-            None => tr("No waypoint link in clipboard", "В буфере нет ссылки на метку", "Aucun lien de repère dans le presse-papiers", "No hay enlace en el portapapeles", "Kein Wegpunktlink in der Zwischenablage").to_owned(),
-        };
-        state.notice = Some((message, Instant::now()));
-        *canceled = true;
-        return;
-    }
-    if inside(screen.mouse, show) {
+    if inside(screen.mouse, actions.show) {
         if let Some(dimension) = show_selected_waypoint(state) {
             runtime::initialize(game.native_data_dir(runtime::MOD_ID))
                 .choose_dimension(true, dimension);
@@ -8573,7 +8764,7 @@ fn waypoint_press(
         *canceled = true;
         return;
     }
-    if inside(screen.mouse, rename)
+    if inside(screen.mouse, actions.edit)
         && let Some(key) = selected_waypoint(state).map(Waypoint::key)
     {
         state.waypoint_bulk = None;
@@ -8581,7 +8772,7 @@ fn waypoint_press(
         *canceled = true;
         return;
     }
-    if inside(screen.mouse, delete) && let Some(keys) = &state.waypoint_bulk {
+    if inside(screen.mouse, actions.delete) && let Some(keys) = &state.waypoint_bulk {
         if !keys.is_empty() {
             if state.waypoint_confirm_delete {
                 edit_waypoint_batch(game, state, runtime::WaypointBatch::Delete);
@@ -8592,10 +8783,15 @@ fn waypoint_press(
         *canceled = true;
         return;
     }
-    if inside(screen.mouse, delete)
-        && let Some(waypoint) = selected_waypoint(state)
+    if inside(screen.mouse, actions.delete)
+        && let Some(key) = selected_waypoint(state).map(Waypoint::key)
     {
-        controller.delete_waypoint(&state.world, waypoint.key());
+        if !std::mem::take(&mut state.waypoint_confirm_delete) {
+            state.waypoint_confirm_delete = true;
+            *canceled = true;
+            return;
+        }
+        controller.delete_waypoint(&state.world, key);
         state.notice = Some((
             tr(
                 "Waypoint deleted",
@@ -8622,7 +8818,8 @@ fn name_press(
     if button != 0 {
         return;
     }
-    let rect = name_form_rect(screen.rect[2], screen.rect[3]);
+    let group_only = state.name_form.as_ref().is_some_and(|form| form.group_edit.is_some());
+    let rect = name_form_rect(screen.rect[2], screen.rect[3], group_only);
     if let Some(form) = state.name_form.as_mut() {
         if form.group_edit.is_none() && inside(screen.mouse, group_field(rect)) {
             form.group_focused = true;
@@ -8630,14 +8827,14 @@ fn name_press(
             *canceled = true;
             return;
         }
-        if inside(screen.mouse, [rect[0] + 10.0, rect[1] + 26.0, rect[2] - 20.0, 18.0]) {
+        if inside(screen.mouse, name_field(rect)) {
             form.group_focused = false;
             form.select_all = false;
             *canceled = true;
             return;
         }
     }
-    for (index, &color) in runtime::WAYPOINT_COLORS.iter().enumerate() {
+    for (index, &color) in runtime::WAYPOINT_COLORS.iter().enumerate().filter(|_| !group_only) {
         if inside(screen.mouse, color_swatch_at(rect, index)) {
             if let Some(form) = state.name_form.as_mut() {
                 form.color = color;
@@ -8767,7 +8964,7 @@ pub(super) fn drag(game: &Game<'_>, delta: [f32; 2], button: i32, canceled: &mut
     }
     if state.mode == Mode::Settings {
         if let Some((key, [x, width])) = &state.settings_slider
-            && let Some(row) = settings_catalog(game, state.settings_tab).find(|row| &row.key == key)
+            && let Some(row) = settings_catalog(game).find(|row| &row.key == key)
         {
             let mut next = row.value.clone();
             next.slide((game.cursor()[0] - x) / width);
@@ -8804,7 +9001,8 @@ pub(super) fn scroll(
             return;
         }
         let panel=settings_panel(screen.rect[2],screen.rect[3]);
-        let max=settings_catalog(game,state.settings_tab).count().saturating_sub(settings_rows(panel));
+        let searching = !state.settings_search.trim().is_empty();
+        let max=settings_entries(game,&state).count().saturating_sub(settings_rows(panel,searching));
         state.settings_scroll=(state.settings_scroll as i64-scroll[1] as i64).clamp(0,max as i64) as usize;
         *canceled=true;
         return;
@@ -8926,12 +9124,35 @@ pub(super) fn screen_key(game: &Game<'_>, key: &str, modifiers: u32, canceled: &
                 "key.keyboard.escape" => state.placement = None,
                 _ => {}
             }
+        } else if key == "key.keyboard.f" && modifiers & 10 != 0 {
+            focus_settings_search(&mut state, true);
+        } else if state.settings_search_focus {
+            match key {
+                "key.keyboard.escape" => {
+                    state.settings_search.clear();
+                    settings_query_changed(&mut state);
+                    focus_settings_search(&mut state,false);
+                }
+                "key.keyboard.enter" | "key.keyboard.keypad.enter" => focus_settings_search(&mut state,false),
+                "key.keyboard.backspace" => {
+                    state.settings_search.pop();
+                    settings_query_changed(&mut state);
+                }
+                "key.keyboard.a" if modifiers & 10 != 0 => {
+                    state.settings_search.clear();
+                    settings_query_changed(&mut state);
+                }
+                "key.keyboard.v" if modifiers & 10 != 0 => {
+                    append_settings_query(&mut state, game.clipboard.text().chars());
+                }
+                _ => {}
+            }
         } else if key == "key.keyboard.escape" {
             close_settings(&mut state);
         } else if matches!(key, "key.keyboard.page.up" | "key.keyboard.page.down" | "key.keyboard.home" | "key.keyboard.end") {
             let (w, h) = game.gui_size();
-            let count = settings_rows(settings_panel(w, h));
-            let max = settings_catalog(game, state.settings_tab).count().saturating_sub(count);
+            let count = settings_rows(settings_panel(w,h), !state.settings_search.trim().is_empty());
+            let max = settings_entries(game,&state).count().saturating_sub(count);
             state.settings_scroll = match key {
                 "key.keyboard.page.up" => state.settings_scroll.saturating_sub(count),
                 "key.keyboard.page.down" => (state.settings_scroll + count).min(max),
@@ -8969,6 +9190,11 @@ pub(super) fn screen_key(game: &Game<'_>, key: &str, modifiers: u32, canceled: &
         *canceled=true;
         return;
     }
+    if state.mode == Mode::Waypoints && state.waypoint_share_open && key == "key.keyboard.escape" {
+        state.waypoint_share_open = false;
+        *canceled = true;
+        return;
+    }
     if state.mode == Mode::Waypoints && state.waypoint_groups_open && key=="key.keyboard.escape" {
         state.waypoint_groups_open=false;
         state.waypoint_group_move=false;
@@ -8988,6 +9214,7 @@ pub(super) fn screen_key(game: &Game<'_>, key: &str, modifiers: u32, canceled: &
             state.menu = None;
             state.dragging = false;
         }
+        state.waypoint_share_open = false;
         state.waypoint_search_focus = true;
         runtime::set_text_input(true);
         *canceled = true;
@@ -8999,7 +9226,13 @@ pub(super) fn screen_key(game: &Game<'_>, key: &str, modifiers: u32, canceled: &
         *canceled = true;
         return;
     }
+    if state.mode == Mode::Waypoints && key == "key.keyboard.escape" && state.waypoint_confirm_delete {
+        state.waypoint_confirm_delete = false;
+        *canceled = true;
+        return;
+    }
     if state.mode==Mode::Waypoints && matches!(key,"key.keyboard.up"|"key.keyboard.down") {
+        state.waypoint_confirm_delete=false;
         let step=if key=="key.keyboard.up" {-1} else {1};
         let (_,h)=game.gui_size();
         let count=waypoint_visible_rows(h);
@@ -9081,6 +9314,12 @@ pub(super) fn screen_key(game: &Game<'_>, key: &str, modifiers: u32, canceled: &
         return;
     }
     if key == "key.keyboard.escape" {
+        if state.mode == Mode::Caches {
+            state.caches.confirm = None;
+            state.mode = Mode::Map;
+            *canceled = true;
+            return;
+        }
         if state.mode == Mode::Map && state.menu.take().is_some() {
             *canceled = true;
             return;
@@ -9114,6 +9353,11 @@ pub(super) fn screen_char(game: &Game<'_>, c: char, canceled: &mut bool) {
     }
     if let Some(editor) = &mut state.radar_editor {
         editor.character(c);
+        *canceled = true;
+        return;
+    }
+    if state.mode == Mode::Settings && state.settings_search_focus {
+        append_settings_query(&mut state, std::iter::once(c));
         *canceled = true;
         return;
     }

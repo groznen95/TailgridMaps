@@ -2,7 +2,11 @@
 use super::{
     Game,
     minimap_compat::{MapAccess, xaero_radar_categories},
-    reworked_maps::{button, draw_scroll_indicator, draw_tooltip, fit_text, inside, settings_panel, ui_panel, UI_ACCENT},
+    reworked_maps::{
+        ButtonStyle, UI_HOVER, UI_MUTED, UI_ROW, UI_SCRIM, UI_TEXT, button,
+        draw_scroll_indicator, draw_tooltip, fit_text, inside, settings_panel, ui_button,
+        ui_field, ui_heading, ui_panel,
+    },
 };
 use ::trailgrid_maps::{radar::Selector, runtime, xaero_settings};
 use horizon_client::hud::HudBatch;
@@ -528,20 +532,14 @@ fn action(panel: [f32; 4], index: usize) -> [f32; 4] {
 pub(super) fn draw(game: &Game<'_>, batch: &mut HudBatch, editor: &Editor) {
     let panel = settings_panel(batch.width, batch.height);
     let mouse = game.cursor();
-    game.native_fill(batch, [0., 0., batch.width, batch.height], 0x80110e0f);
+    game.native_fill(batch, [0., 0., batch.width, batch.height], UI_SCRIM);
     ui_panel(game, batch, panel);
-    game.map_text(
-        batch,
-        localized("Radar categories", "Категории радара"),
-        [panel[0] + 10., panel[1] + 8.],
-        0xfff0f5f8,
-        true,
-    );
+    ui_heading(game, batch, panel, localized("Radar categories", "Категории радара"));
     game.map_text(
         batch,
         &fit_text(game, &editor.path_label(), panel[2] - 20.),
-        [panel[0] + 10., panel[1] + 25.],
-        0xffb9cbd8,
+        [panel[0] + 11., panel[1] + 30.],
+        UI_MUTED,
         false,
     );
     let current = editor.current();
@@ -591,24 +589,17 @@ pub(super) fn draw(game: &Game<'_>, batch: &mut HudBatch, editor: &Editor) {
         if label != full_label && inside(mouse, rect) {
             tooltip = Some(full_label);
         }
+        game.native_fill(batch, rect, if inside(mouse, rect) { UI_HOVER } else { UI_ROW });
         game.map_text(
             batch,
             &label,
-            [rect[0] + 2., rect[1] + 5.],
-            0xffeaf1f6,
+            [rect[0] + 5., rect[1] + 6.],
+            UI_TEXT,
             false,
         );
-        button(
-            game,
-            batch,
-            control,
-            &fit_text(game, &value, right - 8.),
-            mouse,
-            true,
-        );
-        if active.is_some() {
-            game.native_fill(batch, [control[0] + 2., control[1] + 18., right - 4., 1.], UI_ACCENT);
-        }
+        ui_field(game, batch, control, active.is_some());
+        game.map_text(batch, &fit_text(game, &value, right-12.), [control[0]+6.,control[1]+6.],
+            if field.value(current).is_null() && active.is_none() { UI_MUTED } else { UI_TEXT },false);
     }
     draw_scroll_indicator(game, batch, [panel[0], panel[1] + 42., panel[2], count as f32 * 22.],
         children + FIELDS.len(), count, start);
@@ -642,12 +633,12 @@ pub(super) fn draw(game: &Game<'_>, batch: &mut HudBatch, editor: &Editor) {
         batch,
         &fit_text(game, help, panel[2] - 22.),
         [panel[0] + 10., panel[1] + panel[3] - 67.],
-        0xffb9cbd8,
+        UI_MUTED,
         false,
     );
     let child = !editor.path.is_empty();
     for (index, (text, enabled)) in [
-        (localized("Parent", "На уровень выше"), child),
+        (localized("Parent", "К группе"), child),
         (localized("Add child", "Добавить"), true),
         (localized("Move up", "Выше"), child),
         (localized("Move down", "Ниже"), child),
@@ -666,13 +657,16 @@ pub(super) fn draw(game: &Game<'_>, batch: &mut HudBatch, editor: &Editor) {
     .enumerate()
     {
         let rect = action(panel, index);
-        button(
+        ui_button(
             game,
             batch,
             rect,
             &fit_text(game, text, rect[2] - 5.),
             mouse,
             enabled,
+            if index == 5 { ButtonStyle::Primary }
+            else if index == 4 && editor.confirm { ButtonStyle::Confirm }
+            else { ButtonStyle::Plain },
         );
     }
 }

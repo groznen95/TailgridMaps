@@ -1,5 +1,21 @@
 # Kadir's Map validation
 
+## 0.1.13
+
+The source `.hmod` passed the native package checker and built on macOS Apple Silicon for Horizon Nightly 2026-11-22 (`2b77287`), Minecraft 26.3 and Mixins `e59da90`.
+
+In a local world, Ctrl+F found a setting from a different tab by its English and Russian names. The setting could be changed from the results. At GUI scale 2, the waypoint Share menu opened a link in the chat input, and Escape closed the menu before closing the waypoint list. The first Delete click kept the waypoint and asked for confirmation.
+
+On Horizon SMP, the world map and waypoint list opened with a copy of the existing profile. The copy retained the original waypoint records and cache paths. All map files in the original profile kept their SHA-256 hashes during the check.
+
+## 0.1.12
+
+The native package passed the registry checker and built as `native-2b77287-29b6adc81ee6` on Minecraft 26.3 and Horizon Nightly 2026-11-22. The test instance uses the same package as the prepared download.
+
+The redesigned screens were exercised at 960 × 640 GUI units in English and 480 × 320 in Russian. The in-game checks covered waypoint search and selection, the map sidebar and context menu, PNG export, changing and dragging settings, radar categories, minimap placement, and returning from the cache screen. The first click on a waypoint's delete button left the saved waypoint in place and exposed confirmation.
+
+On Horizon SMP, the final build opened the map and waypoint list on a copy of the existing profile. All prior waypoint records and cache paths were present. The main profile's map files kept their pre-test hashes.
+
 ## 0.1.11
 
 The package passed the registry checker and built as `native-2b77287-6bc316a5b65f` on macOS Apple Silicon against Horizon Nightly 2026-11-22 (`2b77287`), Minecraft 26.3 and Mixins `e59da90`. On the exact SDK, 140 tests passed and three were ignored.

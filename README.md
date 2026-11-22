@@ -2,6 +2,8 @@
 
 Kadir's Map is a client-side Horizon mod with a configurable minimap, a world map that remembers explored terrain, a searchable waypoint list, and entity radar. Map data stays in your local Horizon profile, with separate caches for each world and server.
 
+The map, minimap, waypoint list, settings, radar editor and cache manager share the same interface. Active controls have a turquoise outline. A filled turquoise button marks the main action, and destructive confirmations are amber.
+
 | Default key | Action |
 | --- | --- |
 | `M` | Open or close the world map. Drag to pan and scroll to zoom. |
@@ -12,13 +14,15 @@ Kadir's Map is a client-side Horizon mod with a configurable minimap, a world ma
 | `I` / `O` | Zoom the minimap in or out. Both keys can be rebound. |
 | `G` | Select the next waypoint group. |
 
-In **Y → Minimap → Change position**, drag the minimap or use the arrow keys to move it one GUI pixel at a time. **Save** keeps the new position, and **Use corner** returns to the selected corner. At wide GUI sizes, settings are arranged in two columns. Scroll to see more, right-click a choice to step backward, or drag a slider to adjust it.
+In **Y → Minimap → Change position**, drag the minimap or use the arrow keys to move it one GUI pixel at a time. **Save** keeps the new position, and **Use corner** returns to the selected corner. At wide GUI sizes, settings are arranged in two columns. Scroll to see more, right-click a choice to step backward, or drag a slider to adjust it. Use **Ctrl+F** or **Command+F** to search across every settings tab.
 
 In **Y → Radar → Radar categories**, open a category to edit its filters and styling. The first matching sibling takes priority. Right-click a field to clear its override. The Include and Exclude fields take Xaero selector lists, for example `["minecraft:zombie","player;Steve"]`. **Save and apply** stores a separate copy per settings profile. The imported Xaero file stays available.
 
 Enable radar icons to see textured 3D renderings of mob models, including their appearance variants and overlay layers. If you enable a resource pack with Xaero icon definitions in Horizon, Kadir's Map can also display `sprite`, `normal_sprite`, `outlined_sprite`, fixed `item`, and `dot` icons. Model definitions can select parts of Horizon's mob models and adjust the view. Custom Java variant methods are unavailable in Horizon.
 
-In **N → Select multiple**, click waypoints or select the current search results. You can move the selection to another group, change visibility and 3D markers, or confirm deletion. Use **Local / Global** on a row to control whether that waypoint follows the maximum 3D draw distance. **Open in chat** fills in a Xaero-compatible link for you to review and send.
+In **N → Select multiple**, click waypoints or select the current search results. You can move the selection to another group, change visibility and 3D markers, or confirm deletion. Use **Local / Global** on a row to control whether that waypoint follows the maximum 3D draw distance. **Open in chat** fills in a Xaero-compatible link for you to review and send. At large GUI scales, open **Share** to access the copy, paste, and chat actions.
+
+**Delete** asks for confirmation when deleting one or more waypoints. Press **Esc** to dismiss the confirmation.
 
 When you create or edit a waypoint, the name is selected so you can replace it by typing. Use **Tab** to move between the name and group fields. The active field supports select all, copy, cut and paste. Press **Enter** to save.
 
@@ -42,7 +46,7 @@ The interface follows your game language and defaults to English. To use the rel
 
 ## Install
 
-Version 0.1.11 targets **Horizon Nightly 2026-11-22 (`2b77287`)** and **Minecraft Java Edition 26.3**. Horizon Launcher builds the native source `.hmod` with the signed SDK for that Nightly. To install the package manually, put it at `horizon-native-mods/trailgrid_maps.hmod` inside the instance directory. Enable Kadir's Map and build native mods for that instance.
+Version 0.1.13 targets **Horizon Nightly 2026-11-22 (`2b77287`)** and **Minecraft Java Edition 26.3**. Horizon Launcher builds the native source `.hmod` with the signed SDK for that Nightly. To install the package manually, put it at `horizon-native-mods/trailgrid_maps.hmod` inside the instance directory. Enable Kadir's Map and build native mods for that instance.
 
 Use [v0.1.10](https://github.com/groznen95/trailgrid/releases/tag/v0.1.10) for Nightly 2026-11-21 (`8f83e5c`) or [v0.1.0](https://github.com/groznen95/trailgrid/releases/tag/v0.1.0) for Nightly 2026-11-20 (`0a875da`). Updates use the same mod ID and data directory.
 
