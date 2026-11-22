@@ -109,9 +109,33 @@ struct NameForm {
     rename: Option<Spot>,
     group: String,
     group_focused: bool,
+    select_all: bool,
     kind: MarkerMode,
     group_edit: Option<GroupEdit>,
     background: Mode,
+}
+
+impl NameForm {
+    fn active_text(&mut self) -> &mut String {
+        if self.group_focused { &mut self.group } else { &mut self.text }
+    }
+
+    fn insert(&mut self, characters: impl Iterator<Item = char>) {
+        let mut characters = characters.filter(|c| !c.is_control()).peekable();
+        if characters.peek().is_none() { return; }
+        let select_all = std::mem::take(&mut self.select_all);
+        let group_limit = self.group_focused || self.group_edit.is_some();
+        let text = self.active_text();
+        if select_all { text.clear(); }
+        let mut count = text.chars().count();
+        for c in characters {
+            if (group_limit && text.len() + c.len_utf8() > 128) || (!group_limit && count >= 32) {
+                break;
+            }
+            text.push(c);
+            count += 1;
+        }
+    }
 }
 
 #[derive(Clone,Copy,Default)]
@@ -493,8 +517,7 @@ struct State {
     biome_chunks: BTreeSet<(i32, i32)>,
     leaves: Option<(u64, Arc<LeafPalette>)>,
     lod_elapsed: f64,
-    lod_sources:
-        BTreeMap<(Dimension, maps::LodKey), (Weak<Vec<horizon_client::lod::Column>>, Instant)>,
+    lod_sources: BTreeMap<(Dimension, maps::LodKey), Weak<dyn Send + Sync>>,
     info: Option<Menu>,
     info_scroll: usize,
 }
@@ -502,8 +525,8 @@ fn known_lod_sources(state: &State, dimension: Dimension) -> BTreeMap<(i32, i32,
     state
         .lod_sources
         .iter()
-        .filter(|((d, _), (source, _))| *d == dimension && source.strong_count() != 0)
-        .map(|((_, key), (source, _))| ((key.x, key.z, key.level), source.as_ptr() as usize))
+        .filter(|((d, _), source)| *d == dimension && source.strong_count() != 0)
+        .map(|((_, key), source)| ((key.x, key.z, key.level), source.as_ptr().cast::<()>() as usize))
         .collect()
 }
 impl Default for State {
@@ -1878,6 +1901,7 @@ fn perform_menu(game: &Game<'_>, state: &mut State, menu: Menu, action: MenuActi
                 rename: None,
                 group: state.waypoint_group.clone().unwrap_or_default(),
                 group_focused: false,
+                select_all: true,
                 kind: match action {
                     MenuAction::TemporaryWaypoint => MarkerMode::Temporary,
                     MenuAction::DestinationWaypoint => MarkerMode::Destination,
@@ -2794,6 +2818,20 @@ fn name_buttons(rect: [f32; 4]) -> [[f32; 4]; 2] {
     [[center - w - 3., y, w, 20.], [center + 3., y, w, 20.]]
 }
 
+fn draw_name_field(game: &Game<'_>, batch: &mut HudBatch, rect: [f32; 4], text: &str, active: bool, selected: bool) {
+    ui_panel(game, batch, rect);
+    let [x, y, w, _] = rect;
+    let cursor = if active && !selected { "_" } else { "" };
+    let label = fit_text(game, &format!("{text}{cursor}"), w - 8.);
+    if active {
+        game.native_fill(batch, [x + 1., y + 1., w - 2., 1.], UI_ACCENT);
+        if selected && !label.is_empty() {
+            game.native_fill(batch, [x + 3., y + 3., game.map_text_width(&label) + 2., 12.], UI_SELECTED);
+        }
+    }
+    game.map_text(batch, &label, [x + 4., y + 5.], 0xffffff, false);
+}
+
 fn draw_name_form(game: &Game<'_>, batch: &mut HudBatch, state: &State, form: &NameForm) {
     match form.background {
         Mode::Map => draw_map_screen(game, batch, state),
@@ -2830,20 +2868,11 @@ fn draw_name_form(game: &Game<'_>, batch: &mut HudBatch, state: &State, form: &N
         true,
     );
     let field = [rect[0] + 10.0, rect[1] + 26.0, rect[2] - 20.0, 18.0];
-    ui_panel(game, batch, field);
-    game.map_text(
-        batch,
-        &fit_text(game, &format!("{}{}", form.text, if form.group_focused { "" } else { "_" }), field[2] - 8.),
-        [field[0] + 4.0, field[1] + 5.0],
-        0xffffff,
-        false,
-    );
+    draw_name_field(game, batch, field, &form.text, !form.group_focused, form.select_all);
     if form.group_edit.is_none() {
     let group = group_field(rect);
     game.map_text(batch, tr("Group", "Группа", "Groupe", "Grupo", "Gruppe"), [group[0], group[1]-10.0], 0xaaaaaa, false);
-    ui_panel(game, batch, group);
-    let value = fit_text(game, &form.group, group[2]-12.0);
-    game.map_text(batch, &format!("{value}{}", if form.group_focused { "_" } else { "" }), [group[0]+4.0, group[1]+5.0], 0xffffff, false);
+    draw_name_field(game, batch, group, &form.group, form.group_focused, form.select_all);
     game.map_text(
         batch,
         tr("Colour", "Цвет", "Couleur", "Color", "Farbe"),
@@ -4416,7 +4445,7 @@ pub(super) fn frame(game: &mut Game<'_>, elapsed: Duration) {
             let _timing = runtime::profiling::measure("lod-snapshot-pick");
             state
                 .lod_sources
-                .retain(|_, (source, _)| source.strong_count() != 0);
+                .retain(|_, source| source.strong_count() != 0);
             let known = known_lod_sources(&state, dimension);
             let span = controller
                 .maps
@@ -4428,9 +4457,8 @@ pub(super) fn frame(game: &mut Game<'_>, elapsed: Duration) {
             } else {
                 [player.x, player.z]
             };
-            for (key, columns) in super::minimap_lod_adapter::snapshots(lod, &known, focus, span, 8)
-            {
-                let source = Arc::downgrade(&columns);
+            for snapshot in super::minimap_lod_adapter::snapshots(lod, &known, focus, span, 8) {
+                let super::minimap_lod_adapter::Snapshot { key, source, surfaces } = snapshot;
                 let biome_palette = game
                     .world_biomes
                     .as_ref()
@@ -4443,6 +4471,10 @@ pub(super) fn frame(game: &mut Game<'_>, elapsed: Duration) {
                     z: key.z,
                     level: key.level,
                 };
+                if surfaces.iter().all(Option::is_none) {
+                    state.lod_sources.insert((dimension, key), source);
+                    continue;
+                }
                 let accepted =
                     controller
                         .maps
@@ -4458,7 +4490,7 @@ pub(super) fn frame(game: &mut Game<'_>, elapsed: Duration) {
                                     return None;
                                 }
                                 let cell = ((dz / stride) * 16 + (dx / stride)) as usize;
-                                columns.get(cell)?.surface.map(|surface| surface.biome)
+                                surfaces.get(cell)?.map(|surface| surface.biome)
                             };
                             let color = |id: horizon_world::registry::BlockStateId,
                                          at: [i32; 2]| {
@@ -4518,8 +4550,8 @@ pub(super) fn frame(game: &mut Game<'_>, elapsed: Duration) {
                                 biomes: vec![None; 256],
                                 ..maps::Tile::default()
                             };
-                            for (i, column) in columns.iter().enumerate() {
-                                let Some(surface) = column.surface else {
+                            for (i, surface) in surfaces.into_iter().enumerate() {
+                                let Some(surface) = surface else {
                                     continue;
                                 };
                                 let at = [
@@ -4587,7 +4619,7 @@ pub(super) fn frame(game: &mut Game<'_>, elapsed: Duration) {
                 if accepted {
                     state
                         .lod_sources
-                        .insert((dimension, key), (source, Instant::now()));
+                        .insert((dimension, key), source);
                 }
             }
         }
@@ -8265,6 +8297,7 @@ fn edit_waypoint(state: &mut State, key: u64) {
         }),
         group: waypoint.options.group.clone(),
         group_focused: false,
+        select_all: true,
         kind: MarkerMode::Saved,
         group_edit: None,
         background: state.mode,
@@ -8287,6 +8320,7 @@ fn create_waypoint_here(game: &Game<'_>, state: &mut State) {
         rename: None,
         group: state.waypoint_group.clone().unwrap_or_default(),
         group_focused: false,
+        select_all: true,
         kind: MarkerMode::Saved,
         group_edit: None,
         background: state.mode,
@@ -8440,7 +8474,7 @@ fn waypoint_press(
     if let Some(group_edit) = group_edit {
         let text = match &group_edit {GroupEdit::Create => String::new(),GroupEdit::Rename(name)=>name.clone()};
         state.name_form = Some(NameForm {
-            text, color: 0, target: None, rename: None, group: String::new(), group_focused:false,
+            text, color: 0, target: None, rename: None, group: String::new(), group_focused:false, select_all:true,
             kind: MarkerMode::Saved, group_edit: Some(group_edit), background:Mode::Waypoints,
         });
         state.mode = Mode::Name;
@@ -8592,11 +8626,13 @@ fn name_press(
     if let Some(form) = state.name_form.as_mut() {
         if form.group_edit.is_none() && inside(screen.mouse, group_field(rect)) {
             form.group_focused = true;
+            form.select_all = false;
             *canceled = true;
             return;
         }
         if inside(screen.mouse, [rect[0] + 10.0, rect[1] + 26.0, rect[2] - 20.0, 18.0]) {
             form.group_focused = false;
+            form.select_all = false;
             *canceled = true;
             return;
         }
@@ -8985,6 +9021,13 @@ pub(super) fn screen_key(game: &Game<'_>, key: &str, modifiers: u32, canceled: &
         *canceled=true;
         return;
     }
+    if state.mode == Mode::Waypoints && key == "key.keyboard.f2" {
+        if let Some(key) = selected_waypoint(&state).map(Waypoint::key) {
+            edit_waypoint(&mut state, key);
+        }
+        *canceled = true;
+        return;
+    }
     if state.mode == Mode::Name {
         match key {
             "key.keyboard.escape" => {
@@ -8993,8 +9036,38 @@ pub(super) fn screen_key(game: &Game<'_>, key: &str, modifiers: u32, canceled: &
             }
             "key.keyboard.backspace" => {
                 if let Some(form) = state.name_form.as_mut() {
-                    if form.group_focused { form.group.pop(); } else { form.text.pop(); }
+                    let selected = std::mem::take(&mut form.select_all);
+                    if selected { form.active_text().clear(); } else { form.active_text().pop(); }
                 }
+                *canceled = true;
+            }
+            "key.keyboard.tab" => {
+                if let Some(form) = state.name_form.as_mut() && form.group_edit.is_none() {
+                    form.group_focused = !form.group_focused;
+                    form.select_all = true;
+                }
+                *canceled = true;
+            }
+            "key.keyboard.a" if modifiers & 10 != 0 => {
+                if let Some(form) = state.name_form.as_mut() { form.select_all = true; }
+                *canceled = true;
+            }
+            "key.keyboard.c" | "key.keyboard.x" if modifiers & 10 != 0 => {
+                if let Some(form) = state.name_form.as_mut() && form.select_all {
+                    let field = form.active_text();
+                    let text = if key == "key.keyboard.x" { std::mem::take(field) } else { field.clone() };
+                    if !text.is_empty() { state.pending_copy = Some(text); }
+                }
+                *canceled = true;
+            }
+            "key.keyboard.delete" => {
+                if let Some(form) = state.name_form.as_mut() && std::mem::take(&mut form.select_all) {
+                    form.active_text().clear();
+                }
+                *canceled = true;
+            }
+            "key.keyboard.v" if modifiers & 10 != 0 => {
+                if let Some(form) = state.name_form.as_mut() { form.insert(game.clipboard.text().chars()); }
                 *canceled = true;
             }
             "key.keyboard.enter" | "key.keyboard.keypad.enter" => {
@@ -9058,13 +9131,7 @@ pub(super) fn screen_char(game: &Game<'_>, c: char, canceled: &mut bool) {
     if c.is_control() {
         return;
     }
-    if let Some(form) = state.name_form.as_mut() {
-        if form.group_focused {
-            if form.group.len() + c.len_utf8() <= 128 { form.group.push(c); }
-        } else if if form.group_edit.is_some() {form.text.len()+c.len_utf8()<=128} else {form.text.chars().count()<32} {
-            form.text.push(c);
-        }
-    }
+    if let Some(form) = state.name_form.as_mut() { form.insert(std::iter::once(c)); }
     *canceled = true;
 }
 

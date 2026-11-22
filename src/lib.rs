@@ -357,11 +357,11 @@ impl Hooks for Mod {
 
     fn register_client_commands(&self, _: &mut dyn ClientHost, event: &mut RegisterClientCommandsEvent<'_>) {
         event.commands.push(Command::new("horizon_map_accept <waypoint:text>"));
-        event.commands.push(Command::new("deaths"));
+        event.commands.push(Command::new("mapdeaths"));
     }
 
     fn command(&self, host: &mut dyn ClientHost, event: &mut CommandEvent<'_>) -> Flow {
-        if event.command == "deaths" {
+        if event.command == "mapdeaths" {
             let world = host.client_session().client_server().and_then(|server| {
                 if server.integrated_local {
                     server.save_folder.and_then(|folder| runtime::waypoint_world(true, &folder))
