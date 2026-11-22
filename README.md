@@ -5,7 +5,7 @@ Kadir's Map is a client-side Horizon mod with a configurable minimap, a world ma
 | Default key | Action |
 | --- | --- |
 | `M` | Open or close the world map. Drag to pan and scroll to zoom. |
-| `N` | Open the waypoint list. Filter by group or dimension, search by name, and sort the results. Press Enter to show the selected waypoint on the map. |
+| `N` | Open the waypoint list. Filter by group or dimension, search by name, and sort the results. Press Enter to show the selected waypoint or F2 to edit it. |
 | `K` | Add a waypoint at your current position. |
 | `Y` | Open or close minimap settings. The map toolbar opens world-map settings directly. |
 | `Z` | Enlarge the minimap. |
@@ -19,6 +19,8 @@ In **Y → Radar → Radar categories**, open a category to edit its filters and
 Enable radar icons to see textured 3D renderings of mob models, including their appearance variants and overlay layers. If you enable a resource pack with Xaero icon definitions in Horizon, Kadir's Map can also display `sprite`, `normal_sprite`, `outlined_sprite`, fixed `item`, and `dot` icons. Model definitions can select parts of Horizon's mob models and adjust the view. Custom Java variant methods are unavailable in Horizon.
 
 In **N → Select multiple**, click waypoints or select the current search results. You can move the selection to another group, change visibility and 3D markers, or confirm deletion. Use **Local / Global** on a row to control whether that waypoint follows the maximum 3D draw distance. **Open in chat** fills in a Xaero-compatible link for you to review and send.
+
+When you create or edit a waypoint, the name is selected so you can replace it by typing. Use **Tab** to move between the name and group fields. The active field supports select all, copy, cut and paste. Press **Enter** to save.
 
 Open the **Waypoints** panel with the button in the bottom-right corner of the world map. Click a marker to center the map, or right-click it for editing and sharing. The panel has controls for the active group, all groups, and disabled markers. The search text is shared with the waypoint list. Use **Ctrl+F** or **Command+F** to focus search. Use **M** and **N** to switch between map and list.
 
@@ -34,15 +36,15 @@ In **M → Server worlds**, choose an existing map or create a named one to chan
 
 The defaults are **K** to create a waypoint and **N** to open the list. Horizon uses **B** for its emote wheel, and Freecam+ uses **U**. You can change the map shortcuts in Controls.
 
-Automatic death skulls appear at the death block after you respawn. Kadir's Map uses the server position when available and remembers the position from the death packet otherwise. In **M → Last death**, the world map jumps to the most recent death in that world. **/deaths** shows the last ten saved entries from that world. New profiles retain points until you delete them. An optional waypoint setting can remove a point after you leave its area and return.
+Automatic death skulls appear at the death block after you respawn. Kadir's Map uses the server position when available and remembers the position from the death packet otherwise. In **M → Last death**, the world map jumps to the most recent death in that world. **/mapdeaths** shows the last ten saved entries from that world. New profiles retain points until you delete them. An optional waypoint setting can remove a point after you leave its area and return.
 
 The interface follows your game language and defaults to English. To use the release in English, choose **English (US)** in Minecraft's language settings. Saved waypoint names stay as entered.
 
 ## Install
 
-Version 0.1.10 targets **Horizon Nightly 2026-11-21 (`8f83e5c`)** and **Minecraft Java Edition 26.3**. Horizon Launcher builds the native source `.hmod` with the signed SDK for that Nightly. To install the package manually, put it at `horizon-native-mods/trailgrid_maps.hmod` inside the instance directory. Enable Kadir's Map and build native mods for that instance.
+Version 0.1.11 targets **Horizon Nightly 2026-11-22 (`2b77287`)** and **Minecraft Java Edition 26.3**. Horizon Launcher builds the native source `.hmod` with the signed SDK for that Nightly. To install the package manually, put it at `horizon-native-mods/trailgrid_maps.hmod` inside the instance directory. Enable Kadir's Map and build native mods for that instance.
 
-Use [v0.1.0](https://github.com/groznen95/trailgrid/releases/tag/v0.1.0) for Nightly 2026-11-20 (`0a875da`). Updates use the same mod ID and data directory.
+Use [v0.1.10](https://github.com/groznen95/trailgrid/releases/tag/v0.1.10) for Nightly 2026-11-21 (`8f83e5c`) or [v0.1.0](https://github.com/groznen95/trailgrid/releases/tag/v0.1.0) for Nightly 2026-11-20 (`0a875da`). Updates use the same mod ID and data directory.
 
 Radar shows entities the client receives. Map teleport requires server permissions. On Horizon SMP the claim overlay can query `/claims` and `/claim info`; Waystones and Open Parties and Claims overlays depend on compatible data from the server. Version 0.1.7 was checked against the live Horizon SMP map and against separate test worlds on the same LAN address. See [VALIDATION](VALIDATION.md).
 

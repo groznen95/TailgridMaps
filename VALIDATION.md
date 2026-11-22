@@ -1,5 +1,15 @@
 # Kadir's Map validation
 
+## 0.1.11
+
+The package passed the registry checker and built as `native-2b77287-6bc316a5b65f` on macOS Apple Silicon against Horizon Nightly 2026-11-22 (`2b77287`), Minecraft 26.3 and Mixins `e59da90`. On the exact SDK, 140 tests passed and three were ignored.
+
+In a disposable save, typing replaced the default waypoint name, Tab switched between the name and group fields, and F2 changed the selected waypoint without losing its group. The client command `/mapdeaths` printed local history.
+
+A new Overworld with far terrain enabled wrote 563 far-terrain records into the map cache using the Nov 22 surface API. A separate save scan added a distant region to the export and left its source region file byte for byte unchanged.
+
+The final package ran on Horizon SMP with a copy of the existing map. The live server opened the map and waypoint list and displayed textured radar icons. The original cache paths and waypoint records were present. The main map data matched its pre-test hashes.
+
 ## 0.1.10
 
 The package passed the Horizon registry checker and built with Freecam+ 2.0.5 on Horizon Nightly `8f83e5c`, Minecraft 26.3. The final native build is `native-8f83e5c-6995a5ecf9ad`. On the pinned SDK, 140 tests passed and three were ignored.
