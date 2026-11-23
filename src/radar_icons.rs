@@ -483,7 +483,8 @@ pub(super) fn render(
             let config = definition.and_then(|d| index.and_then(|i| d.models.get(i))).cloned().unwrap_or_default();
             let mut layers = vec![(model.into_owned(), texture.into_owned(), models::body_color(mob, 0.), false)];
             if !config.hide_layers && models::layers_shown(mob) {
-                layers.extend(models::layers(mob, 0.).into_iter().take(12)
+                let armor = game.mob_armor_layers(mob);
+                layers.extend(models::layers(mob, 0., &armor).into_iter().take(12)
                     .map(|layer| (layer.model.into_owned(), layer.texture.into_owned(), layer.color, layer.full_bright)));
             }
             let key = ModelKey { kind: kind.to_owned(), config: index, layers };

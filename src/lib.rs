@@ -145,6 +145,9 @@ impl Hooks for Mod {
             ("auto_subworld_on_death", true),
             ("minimap_claims", true),
             ("world_claims", true),
+            ("world_other_claims", false),
+            ("world_high_detail", true),
+            ("world_relief", true),
             ("minimap_current_claim", true),
             ("waystones_discovered", true),
             ("waystones_other", true),
@@ -412,8 +415,8 @@ impl Hooks for Mod {
         }
         let Ok(line) = host.text_string(event.message) else { return Flow::Continue };
         let dimension = runtime::Dimension::from_id(host.dimension());
-        if event.sender == 0 {
-            map_claims::receive(&line, dimension);
+        if event.sender == 0 && map_claims::receive(&line, dimension) {
+            return Flow::Cancel;
         }
         if let Some(point) = runtime::receive_shared_waypoint(&line, "server:incoming", dimension) {
             use mod_api::text::{TextClick,TextStyle};
