@@ -1,6 +1,6 @@
 id = "trailgrid_maps"
 name = "Kadir's Map"
-version = "0.1.13"
+version = "0.1.17"
 description = "Explore with a configurable minimap, a persistent world map, waypoint groups, and entity radar."
 authors = ["Kadir (maintainer)"]
 license = "GPL-3.0-only"
@@ -12,7 +12,7 @@ capabilities = ["registries"]
 
 [native]
 game = "26.3"
-horizon = "2b77287de099c9316278ba7ac4d83590fdb7ef30"
+horizon = "f1bb66f353cf67f2aa4665293fc75c8d91186fc7"
 mixins = "e59da9094f0c2fdda6c627fe9eff22dec6a906f0"
 
 [[native.module]]
@@ -26,6 +26,12 @@ id="pictures"
 file="crates/horizon-client/src/game.rs"
 name="minimap_pages"
 source="src/map_pictures.rs"
+
+[[native.module]]
+id="terrain-detail"
+file="crates/horizon-client/src/game.rs"
+name="map_terrain_detail"
+source="src/terrain_detail.rs"
 
 [[native.module]]
 id="lod"
@@ -124,6 +130,13 @@ id = "map-press"
 kind = "HEAD"
 target = "horizon_client::game::native_hooks::base::Game::native_screen_mouse_button_pressed_pre"
 helper = "src/press.rs"
+bindings = [{name = "game", ty = "&crate::game::Game<'_>", value = "self"}, {name = "screen", ty = "&mod_api::ScreenView<'_>", value = "screen"}, {name = "button", ty = "i32", value = "button"}, {name = "canceled", ty = "&mut bool", value = "canceled"}]
+
+[[native.mixin]]
+id = "map-release"
+kind = "HEAD"
+target = "horizon_client::game::native_hooks::base::Game::native_screen_mouse_button_released_pre"
+helper = "src/release.rs"
 bindings = [{name = "game", ty = "&crate::game::Game<'_>", value = "self"}, {name = "screen", ty = "&mod_api::ScreenView<'_>", value = "screen"}, {name = "button", ty = "i32", value = "button"}, {name = "canceled", ty = "&mut bool", value = "canceled"}]
 
 [[native.mixin]]
