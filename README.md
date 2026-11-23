@@ -28,6 +28,8 @@ When you create or edit a waypoint, the name is selected so you can replace it b
 
 Open the **Waypoints** panel with the button in the bottom-right corner of the world map. Click a marker to center the map, or right-click it for editing and sharing. The panel has controls for the active group, all groups, and disabled markers. The search text is shared with the waypoint list. Use **Ctrl+F** or **Command+F** to focus search. Use **M** and **N** to switch between map and list.
 
+At 4× zoom and above, the world map samples each loaded surface block's top texture at 4 × 4 pixels. Existing cache data supplies the flat map colors for terrain outside the client’s loaded chunks. At close zoom, the surface map tilts using cached heights. Drag with the right mouse button to rotate or change the angle. Left-drag still pans, and a short right click opens the map menu. The mountain button turns tilt off or back on. Both features also have switches in **Y → World map**.
+
 The world map remembers whether to show disabled markers. When using a manual cave layer, its height can be set separately from the minimap under **Y → World map**.
 
 Under **Y → World map**, choose a maximum PNG size, export a separate 512 × 512 image for each explored region, apply a night tint to surface maps, or include the current claim overlay. **M → Export PNG** saves the explored terrain of the selected layer to the mod's `cache/exports` directory. Region filenames contain their X and Z coordinates. Single-image exports are bounded to 4096 pixels per side. The night tint darkens the saved surface colors.
@@ -46,11 +48,13 @@ The interface follows your game language and defaults to English. To use the rel
 
 ## Install
 
-Version 0.1.13 targets **Horizon Nightly 2026-11-22 (`2b77287`)** and **Minecraft Java Edition 26.3**. Horizon Launcher builds the native source `.hmod` with the signed SDK for that Nightly. To install the package manually, put it at `horizon-native-mods/trailgrid_maps.hmod` inside the instance directory. Enable Kadir's Map and build native mods for that instance.
+Version 0.1.17 targets **Horizon Nightly 2026-11-22 (`f1bb66f`)** and **Minecraft Java Edition 26.3**. Horizon Launcher builds the native source `.hmod` with the signed SDK for that Nightly. To install the package manually, put it at `horizon-native-mods/trailgrid_maps.hmod` inside the instance directory. Enable Kadir's Map and build native mods for that instance.
 
 Use [v0.1.10](https://github.com/groznen95/trailgrid/releases/tag/v0.1.10) for Nightly 2026-11-21 (`8f83e5c`) or [v0.1.0](https://github.com/groznen95/trailgrid/releases/tag/v0.1.0) for Nightly 2026-11-20 (`0a875da`). Updates use the same mod ID and data directory.
 
 Radar shows entities the client receives. Map teleport requires server permissions. On Horizon SMP the claim overlay can query `/claims` and `/claim info`; Waystones and Open Parties and Claims overlays depend on compatible data from the server. Version 0.1.7 was checked against the live Horizon SMP map and against separate test worlds on the same LAN address. See [VALIDATION](VALIDATION.md).
+
+On multiplayer maps, click the grid icon beside **Server worlds** to show or hide other players’ claims. On Horizon SMP, the overlay shows nearby chunks reported by the server. Your claims appear in green after the server confirms `/claim` and disappear after it confirms `/unclaim`. Enable **Show other players’ claims** in World map settings to show foreign claims in amber.
 
 ## Copy maps and waypoints from a previous build
 

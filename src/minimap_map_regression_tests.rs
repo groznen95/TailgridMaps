@@ -18,6 +18,7 @@ macro_rules! define_tests {
                     width: 16,
                     height: 16,
                     angle: 0.0,
+                    relief: None,
                     round: false,
                     large: true,
                 }

@@ -5243,9 +5243,34 @@ pub mod maps {
         pub width: usize,
         pub height: usize,
         pub angle: f64,
+        pub relief: Option<Relief>,
         pub round: bool,
         pub large: bool,
     }
+
+    pub const RELIEF_HEIGHT_LIMIT: f64 = 40.;
+
+    #[derive(Clone)]
+    pub struct Relief {
+        pub pitch: f64,
+        pub reference: f64,
+        pub stride: i32,
+        pub coverage: Arc<Coverage>,
+    }
+
+    impl std::fmt::Debug for Relief {
+        fn fmt(&self, out: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            out.debug_struct("Relief").field("pitch", &self.pitch).field("reference", &self.reference).finish()
+        }
+    }
+
+    impl PartialEq for Relief {
+        fn eq(&self, other: &Self) -> bool {
+            self.pitch == other.pitch && self.reference == other.reference && self.stride == other.stride
+                && Arc::ptr_eq(&self.coverage, &other.coverage)
+        }
+    }
+
     impl View {
         /// Bound lookahead so a remote drag/teleport cannot displace the visible
         /// working set. Padding also retains terrain behind the moving camera.
@@ -5306,15 +5331,43 @@ pub mod maps {
         pub fn world_at(&self, x: f64, y: f64) -> [f64; 2] {
             let dx = (x / self.width as f64 - 0.5) * self.span[0];
             let dz = (y / self.height as f64 - 0.5) * self.span[1];
+            let [x, z] = self.ground_delta([dx, dz]);
+            [self.center[0] + x, self.center[1] + z]
+        }
+
+        pub fn ground_delta(&self, [dx, dz]: [f64; 2]) -> [f64; 2] {
+            self.unrotate([dx, dz / self.relief.as_ref().map_or(1., |relief| relief.pitch.cos())])
+        }
+
+        fn unrotate(&self, [dx, dz]: [f64; 2]) -> [f64; 2] {
             let (s, c) = self.angle.sin_cos();
-            [
-                self.center[0] + dx * c - dz * s,
-                self.center[1] + dx * s + dz * c,
-            ]
+            [dx * c - dz * s, dx * s + dz * c]
+        }
+
+        pub fn terrain_height(&self, block: [i32; 2]) -> Option<i32> {
+            let relief = self.relief.as_ref()?;
+            relief.coverage.detailed_height(self.dimension, self.layer,
+                block.map(|axis| axis.div_euclid(relief.stride) * relief.stride))
         }
         /// The block under pixel `(x, y)` of the frame (`world_at`'s inverse,
         /// rounded down).
         pub fn block_at(&self, x: f64, y: f64) -> [i32; 2] {
+            if let Some(relief) = &self.relief {
+                let u = (x / self.width as f64 - 0.5) * self.span[0];
+                let v = (y / self.height as f64 - 0.5) * self.span[1];
+                let (sin, cos) = relief.pitch.sin_cos();
+                let (mut near, far) = ((v + (RELIEF_HEIGHT_LIMIT + 1.) * sin) / cos,
+                    (v - (RELIEF_HEIGHT_LIMIT + 1.) * sin) / cos);
+                while near >= far {
+                    let [dx, dz] = self.unrotate([u, near]);
+                    let block = [(self.center[0] + dx).floor() as i32, (self.center[1] + dz).floor() as i32];
+                    if let Some(height) = self.terrain_height(block) {
+                        let top = (f64::from(height) - relief.reference).clamp(-RELIEF_HEIGHT_LIMIT, RELIEF_HEIGHT_LIMIT);
+                        if near * cos - top * sin <= v { return block; }
+                    }
+                    near -= 0.33;
+                }
+            }
             let world = self.world_at(x, y);
             [world[0].floor() as i32, world[1].floor() as i32]
         }
@@ -5348,22 +5401,33 @@ pub mod maps {
         pub fn player_heading(&self, yaw: f64, size: [f32; 2]) -> [f32; 2] {
             let angle = self.angle - yaw.to_radians();
             let dx = angle.sin() * f64::from(size[0]) / self.span[0];
-            let dy = angle.cos() * f64::from(size[1]) / self.span[1];
+            let dy = angle.cos() * f64::from(size[1]) / self.span[1]
+                * self.relief.as_ref().map_or(1., |relief| relief.pitch.cos());
             let length = dx.hypot(dy);
             [(dx / length) as f32, (dy / length) as f32]
         }
 
-        /// The frame pixel of a world position: `world_at`'s inverse.
-        pub fn screen_at(&self, [world_x, world_z]: [f64; 2]) -> [f64; 2] {
+        pub fn screen_at_height(&self, [world_x, world_z]: [f64; 2], height: Option<i32>) -> [f64; 2] {
             let (s, c) = self.angle.sin_cos();
             let dx = world_x - self.center[0];
             let dz = world_z - self.center[1];
             let flat_x = dx * c + dz * s;
             let flat_z = -dx * s + dz * c;
+            let y = self.relief.as_ref().map_or(flat_z, |relief| {
+                let (sin, cos) = relief.pitch.sin_cos();
+                let height = (height.map_or(relief.reference, f64::from) - relief.reference)
+                    .clamp(-RELIEF_HEIGHT_LIMIT, RELIEF_HEIGHT_LIMIT);
+                flat_z * cos - height * sin
+            });
             [
                 (flat_x / self.span[0] + 0.5) * self.width as f64,
-                (flat_z / self.span[1] + 0.5) * self.height as f64,
+                (y / self.span[1] + 0.5) * self.height as f64,
             ]
+        }
+
+        /// Anchors overlays to the displayed terrain at their world position.
+        pub fn screen_at(&self, at: [f64; 2]) -> [f64; 2] {
+            self.screen_at_height(at, self.terrain_height(at.map(|axis| axis.floor() as i32)))
         }
     }
     const EASE_RATE: f64 = 24.0;
@@ -5373,6 +5437,7 @@ pub mod maps {
     const SNAP_DISTANCE: f64 = 48.0;
     const MIN_ZOOM: f64 = 0.1;
     const MAX_ZOOM: f64 = 64.0;
+    pub const CLOSE_ZOOM: f64 = 0.25;
 
     fn ease(current: f64, target: f64, dt: f64, rate: f64, epsilon: f64) -> f64 {
         let next = current + (target - current) * (1.0 - (-dt * rate).exp());
@@ -5563,9 +5628,12 @@ pub mod maps {
         pub biome: Option<Arc<str>>,
     }
     impl Coverage {
+        pub fn detailed_tile(&self, dimension: Dimension, layer: Layer, chunk: [i32; 2]) -> Option<&Arc<Tile>> {
+            self.detailed_data.get(&(dimension, layer, chunk[0], chunk[1]))
+        }
+
         pub fn detailed_height(&self, dimension: Dimension, layer: Layer, at: [i32; 2]) -> Option<i32> {
-            let key = (dimension, layer, at[0].div_euclid(16), at[1].div_euclid(16));
-            let tile = self.detailed_data.get(&key)?;
+            let tile = self.detailed_tile(dimension, layer, at.map(|axis| axis.div_euclid(16)))?;
             let cell = (at[1].rem_euclid(16) * 16 + at[0].rem_euclid(16)) as usize;
             (tile.pixels.get(cell * 4 + 3).copied()? != 0).then_some(tile.heights[cell])
         }
@@ -5885,7 +5953,16 @@ pub mod maps {
     /// Clip textured terrain in normalized map coordinates before emitting GPU geometry.
     /// The 64-sided mask differs from a true circle by less than 0.16 GUI pixels at size 256.
     pub fn terrain_polygon(view: &View, bounds: [i64; 4], uv: [f32; 4]) -> Vec<[f64; 4]> {
+        terrain_polygon_at_height(view,bounds,uv,None)
+    }
+
+    pub fn terrain_polygon_at_height(view: &View, bounds: [i64; 4], uv: [f32; 4], height: Option<i32>) -> Vec<[f64; 4]> {
         let (sn, cs) = view.angle.sin_cos();
+        let (depth, lift) = view.relief.as_ref().map_or((1.,0.), |relief| {
+            let (sin,cos) = relief.pitch.sin_cos();
+            let change = height.map_or(0., |height| f64::from(height)-relief.reference);
+            (cos, change.clamp(-RELIEF_HEIGHT_LIMIT,RELIEF_HEIGHT_LIMIT)*sin)
+        });
         let mut points: Vec<_> = [[0., 0.], [1., 0.], [1., 1.], [0., 1.]]
             .into_iter()
             .map(|p| {
@@ -5893,7 +5970,7 @@ pub mod maps {
                 let dz = bounds[1] as f64 + p[1] * bounds[3] as f64 - view.center[1];
                 [
                     (dx * cs + dz * sn) / view.span[0],
-                    (-dx * sn + dz * cs) / view.span[1],
+                    ((-dx * sn + dz * cs) * depth - lift) / view.span[1],
                     f64::from(uv[0]) + p[0] * f64::from(uv[2]),
                     f64::from(uv[1]) + p[1] * f64::from(uv[3]),
                 ]
@@ -8846,6 +8923,7 @@ pub mod maps {
                     let mut paused = false;
                     let mut blocked_format=None;
                     let mut last_probe=None;
+                    let mut last_close_center = None;
                     let mut scan = None::<SaveScan>;
                     loop {
                         let busy=scan.is_some() || cache.visual_work()&&input.lock().unwrap_or_else(|e|e.into_inner()).is_some();
@@ -9126,6 +9204,23 @@ pub mod maps {
                         };
                         if view.session != current || view.session != active.load(Ordering::Acquire) {
                             continue;
+                        }
+                        // Read saved heights around a close-up camera even when its color atlas
+                        // came from precomputed overviews and the player is elsewhere.
+                        if view.large && view.layer == Layer::Surface && view.span[0] <= view.width as f64 * CLOSE_ZOOM {
+                            let [x, z] = view.center.map(|value| (value.floor() as i32).div_euclid(16));
+                            let center = (current, view.dimension, x, z);
+                            if last_close_center != Some(center) {
+                                for dz in -1..=1 {
+                                    for dx in -1..=1 {
+                                        cache.tile_at((view.dimension, view.layer, x + dx, z + dz));
+                                    }
+                                }
+                                last_close_center = Some(center);
+                                changed = true;
+                            }
+                        } else {
+                            last_close_center = None;
                         }
                         let point=*requested_probe.lock().unwrap_or_else(|e|e.into_inner());
                         if let Some((session,d,layer,at))=point.filter(|(s,d,l,_)|*s==current&&*d==view.dimension&&*l==view.layer) {

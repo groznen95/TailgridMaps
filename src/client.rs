@@ -2,7 +2,9 @@
 // Engine adapter: this module is injected under game, never into the standalone library.
 use super::Game;
 use super::minimap_compat::MapAccess;
+use super::map_terrain_detail;
 use runtime::{Language, language, tr};
+use ::trailgrid_maps::map_claims::{self, Claim};
 
 macro_rules! localized_format {
     ($en:literal, $ru:literal, $fr:literal, $es:literal, $de:literal $(, $arg:expr)* $(,)?) => {
@@ -18,7 +20,7 @@ macro_rules! localized_format {
 
 use ::trailgrid_maps::runtime::{
     self as runtime, Dimension, Waypoint,
-    maps::{self, Layer, Portal, View},
+    maps::{self, CLOSE_ZOOM, Layer, Portal, View},
 };
 use horizon_client::{
     chunk::Chunk, client_resources::ClientResources, extras::Corner, extras_hud::Corners,
@@ -449,10 +451,15 @@ struct State {
     large: bool,
     map_opened: Option<Instant>,
     camera: maps::Camera,
+    orbit_angle: f64,
+    orbit_pitch: f64,
+    orbit_height: Option<f64>,
+    orbit_drag: Option<([f32; 2], bool)>,
     marker: [f64; 2],
     footsteps: VecDeque<(Dimension, [i32; 2])>,
     elapsed: f64,
     frame: Option<Arc<maps::Frame>>,
+    detail: map_terrain_detail::DetailCache,
     page_images: Vec<(
         Arc<maps::AtlasPage>,
         Arc<horizon_client::hud::pictures::Picture>,
@@ -486,7 +493,8 @@ struct State {
     slime_seed: Option<i64>,
     slime_preview: bool,
     slime_overlay: bool,
-    claims: BTreeMap<::trailgrid_maps::map_claims::Chunk, Option<String>>,
+    claims: BTreeMap<map_claims::Chunk, Claim>,
+    last_claim_survey: Option<(map_claims::Chunk, Instant)>,
     opac: super::minimap_providers::OpenPac,
     info_displays: Option<Vec<::trailgrid_maps::xaero_settings::InfoDisplay>>,
     notice: Option<(String, Instant)>,
@@ -554,10 +562,15 @@ impl Default for State {
             large: false,
             map_opened: None,
             camera: maps::Camera::new([0.0; 2], 2.0),
+            orbit_angle: 0.,
+            orbit_pitch: 38_f64.to_radians(),
+            orbit_height: None,
+            orbit_drag: None,
             marker: [0.0; 2],
             footsteps: VecDeque::new(),
             elapsed: 1.0,
             frame: None,
+            detail: Default::default(),
             page_images: Vec::new(),
             dragging: false,
             close: false,
@@ -589,6 +602,7 @@ impl Default for State {
             slime_preview: false,
             slime_overlay: false,
             claims: BTreeMap::new(),
+            last_claim_survey: None,
             opac: super::minimap_providers::OpenPac::default(),
             info_displays: None,
             notice: None,
@@ -1020,6 +1034,16 @@ fn block_rect(view: &View, rect: [f32; 4], block: [i32; 2]) -> [f32; 4] {
 }
 
 fn highlight(game: &Game<'_>, batch: &mut HudBatch, view: &View, rect: [f32; 4], block: [i32; 2]) {
+    if view.relief.is_some() {
+        let height = view.terrain_height(block);
+        let [x,z] = block.map(f64::from);
+        let quad = [[x,z],[x+1.,z],[x+1.,z+1.],[x,z+1.]].map(|point| {
+            let [x,y] = view.screen_at_height(point, height);
+            [rect[0] + x as f32 * rect[2] / view.width as f32, rect[1] + y as f32 * rect[3] / view.height as f32]
+        });
+        game.native_quad(batch, quad, 0x40ffffff);
+        return;
+    }
     let cell = block_rect(view, rect, block);
     if cell[2] < 1.0 || cell[3] < 1.0 {
         return;
@@ -3116,6 +3140,14 @@ fn claim_colors(game: &Game<'_>, large: bool, own: bool) -> (u32, u32) {
     (argb(fill), argb(border))
 }
 
+fn show_other_claims(game: &Game<'_>) -> bool {
+    game.map_option("world_other_claims") == Some(1)
+}
+
+fn show_world_other_claims(game: &Game<'_>) -> bool {
+    show_other_claims(game) && game.map_option("world_claims") != Some(0)
+}
+
 fn draw_claims(game: &Game<'_>, batch: &mut HudBatch, state: &State, view: &View, rect: [f32; 4]) {
     if game.map_option(if view.large { "world_claims" } else { "minimap_claims" }) == Some(0) {
         return;
@@ -3126,14 +3158,17 @@ fn draw_claims(game: &Game<'_>, batch: &mut HudBatch, state: &State, view: &View
     let chunk_at = |x: i64| x.div_euclid(16) as i32;
     let min = [chunk_at(region[0]), chunk_at(region[1])];
     let max = [chunk_at(region[0] + region[2]), chunk_at(region[1] + region[3])];
-    let native = state.claims.iter().filter_map(|(&chunk, owner)| {
-        (chunk.0 == view.dimension).then_some((chunk, owner.is_none()))
+    let show_other = show_other_claims(game);
+    let native = state.claims.iter().filter_map(|(&chunk, claim)| {
+        (chunk.0 == view.dimension).then_some((chunk, claim.is_own()))
     });
     let opac = state.opac.chunks(view.dimension, min, max).filter_map(|chunk| {
         let (owner, _) = state.opac.owner(chunk)?;
         Some((chunk, owner == game.own_uuid()))
     });
     for ((_, x, z), own) in native.chain(opac) {
+        if !own && !show_other { continue; }
+        if view.relief.as_ref().is_some_and(|r| r.coverage.detailed_tile(view.dimension,view.layer,[x,z]).is_some()) { continue; }
         let [x, z] = [i64::from(x) * 16, i64::from(z) * 16];
         if x + 16 < region[0] || z + 16 < region[1] || x > region[0] + region[2] || z > region[1] + region[3] {
             continue;
@@ -3425,7 +3460,7 @@ fn draw_border(
     }
 }
 
-fn draw_line(
+pub(super) fn draw_line(
     game: &Game<'_>,
     batch: &mut HudBatch,
     mut from: [f32; 2],
@@ -4130,7 +4165,7 @@ pub(super) fn frame(game: &mut Game<'_>, elapsed: Duration) {
         return;
     }
     let base_world = base_world(&identity).unwrap_or_default();
-    let (copy, chat, command, change, placement) = {
+    let (copy, chat, command, change, placement, survey) = {
         let mut state = state();
         if base_world.starts_with("server:")
             && std::mem::take(&mut state.server_world_signal_pending)
@@ -4139,11 +4174,28 @@ pub(super) fn frame(game: &mut Game<'_>, elapsed: Duration) {
         {
             log::info!("[map-auto-world] Applied the server's world identity");
         }
+        let survey = if !base_world.is_empty() && state.base_world == base_world && official_smp(game) && show_other_claims(game) {
+            let dimension = Dimension::from_id(player.dimension);
+            let chunk = (dimension, (player.x.floor() as i32).div_euclid(16), (player.z.floor() as i32).div_euclid(16));
+            let map_open = game.mod_screen() == Some(runtime::MOD_ID) && state.mode == Mode::Map;
+            state.last_claim_survey.is_none_or(|((level, x, z), sent)| {
+                let elapsed = sent.elapsed();
+                elapsed >= Duration::from_secs(12) && (dimension != level
+                    || chunk.1.abs_diff(x).max(chunk.2.abs_diff(z)) >= 4
+                    || map_open && elapsed >= Duration::from_secs(60))
+            }).then(|| {
+                state.last_claim_survey = Some((chunk, Instant::now()));
+                dimension
+            })
+        } else { None };
         (state.pending_copy.take(), state.pending_chat.take(), state.pending_command.take(),
-            state.map_settings_change.take(), state.placement_change.take())
+            state.map_settings_change.take(), state.placement_change.take(), survey)
     };
     if let Some((key, value)) = change {
         super::minimap_compat::write_map_setting(game, &key, &value);
+        if key == "world_other_claims" && value == "true" && game.map_option("world_claims") == Some(0) {
+            super::minimap_compat::write_map_setting(game, "world_claims", "true");
+        }
     }
     if let Some(placement) = placement {
         use super::minimap_compat::write_map_setting;
@@ -4166,6 +4218,11 @@ pub(super) fn frame(game: &mut Game<'_>, elapsed: Duration) {
     }
     if let Some(command) = command {
         game.click_command(&command);
+    }
+    if let Some(dimension) = survey {
+        map_claims::expect_survey(dimension);
+        game.click_command("claims map");
+        game.click_command("claim info");
     }
     let mut state = state();
     if let Some(import) = state.settings_import.as_ref().and_then(|rx| match rx.try_recv() {
@@ -4319,21 +4376,13 @@ pub(super) fn frame(game: &mut Game<'_>, elapsed: Duration) {
         };
         controller.maps.reset(next);
     }
-    use ::trailgrid_maps::map_claims;
     let claim_replies = map_claims::take_replies();
     if official_smp(game) {
         for reply in claim_replies {
-            match reply {
-                map_claims::Reply::Own(own) => {
-                    log::info!("[{}] Synced {} owned chunks from Horizon SMP", runtime::MOD_ID, own.len());
-                    state.claims.retain(|_, owner| owner.is_some());
-                    for chunk in own { state.claims.insert(chunk, None); }
-                }
-                map_claims::Reply::Here(chunk, Some(owner)) => {
-                    if state.claims.len() < 8192 { state.claims.entry(chunk).or_insert(Some(owner)); }
-                }
-                map_claims::Reply::Here(chunk, None) => { state.claims.remove(&chunk); }
+            if let map_claims::Reply::Own(own) = &reply {
+                log::info!("[{}] Synced {} owned chunks from Horizon SMP", runtime::MOD_ID, own.len());
             }
+            map_claims::apply(&mut state.claims, reply);
         }
     }
     let enabled = game.map_option("use_xaero_radar") == Some(1);
@@ -4491,7 +4540,10 @@ pub(super) fn frame(game: &mut Game<'_>, elapsed: Duration) {
     .resolve(dimension);
     let position = dimension.convert(selected, [player.x, player.z]);
     if selected != state.selected || large != state.large {
-        if large!=state.large {state.map_opened=large.then(Instant::now);}
+        if large!=state.large {
+            state.map_opened=large.then(Instant::now);
+            state.orbit_drag=None;
+        }
         state.camera.snap(position);
         state.marker = position;
         state.selected = selected;
@@ -4935,16 +4987,49 @@ pub(super) fn frame(game: &mut Game<'_>, elapsed: Duration) {
             } else {
                 0.0
             },
+            relief: None,
             round: !large && settings.round,
             large,
         };
-        let mut target = view.clone();
+        let tilt = large && selected_layer == Layer::Surface && game.map_option("world_relief") != Some(0);
+        let mut prepared = view.clone();
+        if tilt && state.camera.zoom.min(state.camera.zoom_target) <= CLOSE_ZOOM {
+            // The worker prepares north-up, but a rotated view needs the terrain
+            // beyond its corners and behind tall surface columns.
+            let extent = span[0].hypot(span[1] / state.orbit_pitch.cos())
+                + 2. * maps::RELIEF_HEIGHT_LIMIT * state.orbit_pitch.tan();
+            prepared.width = (width as f64 * extent / span[0]).ceil() as usize;
+            prepared.height = (height as f64 * extent / span[1]).ceil() as usize;
+            prepared.span = [extent; 2];
+        }
+        let mut target = prepared.clone();
         target.center = state.camera.target;
         if large {
             let ratio = state.camera.zoom_target / state.camera.zoom;
-            target.span = span.map(|size| size * ratio);
+            target.span = prepared.span.map(|size| size * ratio);
         }
-        controller.maps.request_ahead(view.clone(), target);
+        controller.maps.request_ahead(prepared, target);
+        let mut view = view;
+        let tilt = if tilt { ((CLOSE_ZOOM - state.camera.zoom) / 0.085).clamp(0., 1.) } else { 0. };
+        if tilt > 0. {
+            let coverage = controller.maps.coverage();
+            let [x,z] = view.center.map(|axis| axis.floor() as i32);
+            let height = [[x,z],[x+8,z],[x-8,z],[x,z+8],[x,z-8]].into_iter()
+                .find_map(|point| coverage.detailed_height(view.dimension, view.layer, point))
+                .unwrap_or_else(|| if view.dimension == dimension { player.y.floor() as i32 - 1 } else { 64 });
+            let height = f64::from(height);
+            let previous = state.orbit_height.unwrap_or(height);
+            let reference = if (previous - height).abs() > 48. { height }
+                else { previous + (height - previous) * (1. - (-14. * dt.clamp(0., 0.25)).exp()) };
+            state.orbit_height = Some(reference);
+            view.angle = state.orbit_angle * tilt;
+            let pitch = state.orbit_pitch * tilt;
+            let size = (span[0] * span[1] / pitch.cos() / 24_000.).sqrt().ceil() as u32;
+            let stride = size.clamp(1, 4).next_power_of_two() as i32;
+            view.relief = Some(maps::Relief { pitch, reference, stride, coverage });
+        } else {
+            state.orbit_height = None;
+        }
         current_view = Some(view);
     }
     if let Some(image) = controller.maps.frame()
@@ -4971,10 +5056,13 @@ pub(super) fn frame(game: &mut Game<'_>, elapsed: Duration) {
                 atlas: Some(atlas.clone()),
             })
         } else if let Some(view) = current_view.filter(|view| view.large) {
+            let mut view = complete_map_view(view, &image.view);
+            view.angle = 0.;
+            view.relief = None;
             Arc::new(maps::Frame {
                 raster_source: Some(image.clone()),
                 serial: image.serial,
-                view: complete_map_view(view, &image.view),
+                view,
                 pixels: Vec::new(),
                 known: image.known,
                 atlas: None,
@@ -5017,6 +5105,13 @@ pub(super) fn frame(game: &mut Game<'_>, elapsed: Duration) {
                 .collect();
         } else {
             state.page_images.clear();
+        }
+        if next.view.large && state.camera.zoom <= CLOSE_ZOOM && next.view.layer == Layer::Surface
+            && next.view.dimension == dimension && game.map_option("world_high_detail") != Some(0)
+        {
+            state.detail.refresh(game, &next, &controller.maps.coverage());
+        } else {
+            state.detail.clear();
         }
         let previous = if next.atlas.is_some() {
             state.frame.as_ref().and_then(|f| f.atlas.clone())
@@ -5093,15 +5188,22 @@ pub(super) fn check_map_item(game:&mut Game<'_>,large:bool)->bool {
 }
 
 type InfoLine = (String, Option<u32>, Option<u32>);
-fn claim_text(game: &Game<'_>, state: &State, key: ::trailgrid_maps::map_claims::Chunk) -> Option<String> {
+fn claim_text(game: &Game<'_>, state: &State, key: map_claims::Chunk) -> Option<String> {
     let prefix = tr("Claim", "Приват", "Claim", "Parcela", "Claim");
     let own = tr("yours", "твой", "à toi", "tuya", "dein");
-    if let Some(owner) = state.claims.get(&key) {
-        return Some(format!("{prefix} · {}",owner.as_deref().unwrap_or(own)));
+    let other = tr("another player", "другого игрока", "autre joueur", "otro jugador", "anderer Spieler");
+    let visible_other = show_other_claims(game);
+    if let Some(claim) = state.claims.get(&key) {
+        let owner = match claim {
+            Claim::Own => own,
+            Claim::Other(name) if visible_other => name.as_deref().unwrap_or(other),
+            Claim::Other(_) => return None,
+        };
+        return Some(format!("{prefix} · {owner}"));
     }
     let (owner, name) = state.opac.owner(key)?;
-    Some(format!("{prefix} · {}", if owner == game.own_uuid() { own }
-        else { name.unwrap_or(tr("claimed", "занят", "protégé", "ocupada", "geschützt")) }))
+    if owner == game.own_uuid() { Some(format!("{prefix} · {own}")) }
+    else { visible_other.then(|| format!("{prefix} · {}", name.unwrap_or(other))) }
 }
 
 fn minimap_lines(game: &Game<'_>, state: &State, settings: runtime::minimap::Settings) -> Vec<InfoLine> {
@@ -5498,6 +5600,7 @@ fn draw_terrain_polygon(
 }
 
 fn draw_paged_terrain(
+    game: &Game<'_>,
     batch: &mut HudBatch,
     state: &State,
     frame: &maps::Frame,
@@ -5512,7 +5615,7 @@ fn draw_paged_terrain(
             batch.pictures.push(image.clone());
         }
     }
-    let mut paint = |bounds: [i64; 4], mut uv: [f32; 4]| {
+    let mut paint = |bounds: [i64; 4], mut uv: [f32; 4], detailed: Option<([i32; 2], usize)>, height: Option<i32>| {
         if frame.view.terrain_style.live_chunks_only
             && (state.dimension != frame.view.dimension
                 || bounds[2] != 16 || bounds[3] != 16
@@ -5521,10 +5624,15 @@ fn draw_paged_terrain(
             return;
         }
         let page = uv[1] as usize / 64;
-        let Some((_, image)) = state.page_images.get(page) else {
+        let Some((source, page_image)) = state.page_images.get(page) else {
             return;
         };
         uv[1] -= (page * 64) as f32;
+        let image = detailed.and_then(|(chunk, slot)| state.detail.picture(chunk, source, slot))
+            .map_or(page_image, |image| {
+                uv = [0., 0., image.width as f32, image.height as f32];
+                image
+            });
         if image.flags.blur {
             // Keep linear filtering within this atlas tile.
             for axis in 0..2 {
@@ -5533,7 +5641,7 @@ fn draw_paged_terrain(
                 uv[axis + 2] -= inset * 2.;
             }
         }
-        let mut points = maps::terrain_polygon(&frame.view, bounds, uv);
+        let mut points = maps::terrain_polygon_at_height(&frame.view, bounds, uv, height);
         for p in &mut points {
             p[0] = f64::from(rect[0]) + (p[0] + 0.5) * f64::from(rect[2]);
             p[1] = f64::from(rect[1]) + (p[1] + 0.5) * f64::from(rect[3]);
@@ -5547,6 +5655,10 @@ fn draw_paged_terrain(
         }
         let bounds = coarse.key.bounds();
         for part in &coarse.fragments {
+            let surface = frame.view.relief.as_ref().and_then(|relief| {
+                let at = [(part[0] + part[2] / 2) as i32, (part[1] + part[3] / 2) as i32];
+                relief.coverage.lod_sample(frame.view.dimension,frame.view.layer,at).map(|surface| surface.height)
+            });
             paint(
                 *part,
                 [
@@ -5557,16 +5669,38 @@ fn draw_paged_terrain(
                     (part[2] as f64 * 16. / bounds[2] as f64) as f32,
                     (part[3] as f64 * 16. / bounds[3] as f64) as f32,
                 ],
+                None,
+                surface,
             );
         }
     }
     for &i in &atlas.draw_order {
         let chunk = &atlas.chunks[i];
+        if frame.view.relief.as_ref().is_some_and(|r| r.coverage.detailed_tile(frame.view.dimension,frame.view.layer,*chunk).is_some()) {
+            continue;
+        }
         let slot = atlas.slots[i];
         paint(
             [i64::from(chunk[0]) * 16, i64::from(chunk[1]) * 16, 16, 16],
             [(slot % 64 * 16) as f32, (slot / 64 * 16) as f32, 16., 16.],
+            frame.view.large.then_some((*chunk, slot)),
+            None,
         );
+    }
+    if frame.view.relief.is_some() {
+        let dimension = frame.view.dimension;
+        let own = game.own_uuid();
+        let claims = game.map_option("world_claims") != Some(0);
+        let show_other = show_other_claims(game);
+        let own_colors = claim_colors(game,true,true);
+        let other_colors = claim_colors(game,true,false);
+        visible |= map_terrain_detail::paint_surface(game,batch,frame,&state.detail,&state.page_images,rect,|[x,z]| {
+            if !claims { return None; }
+            let key = (dimension,x,z);
+            let own_claim = state.claims.get(&key).map(Claim::is_own)
+                .or_else(|| state.opac.owner(key).map(|(owner,_)| owner == own))?;
+            if own_claim { Some(own_colors) } else { show_other.then_some(other_colors) }
+        });
     }
     visible
 }
@@ -6032,7 +6166,7 @@ fn draw(
         if let Some(atlas) = &frame.atlas {
             terrain_visible = false;
             if !atlas.pages.is_empty() {
-                terrain_visible = draw_paged_terrain(batch, state, frame, atlas, rect);
+                terrain_visible = draw_paged_terrain(game, batch, state, frame, atlas, rect);
             } else {
                 for coarse in &atlas.coarse {
                     for part in &coarse.fragments {
@@ -6591,14 +6725,15 @@ fn export_map_png(game: &Game<'_>, state: &mut State, dimension: Dimension) {
     if game.map_option("world_png_claims") == Some(1) && game.map_option("world_claims") != Some(0) {
         let own = claim_colors(game, true, true);
         let other = claim_colors(game, true, false);
-        for (&(layer, x, z), owner) in &state.claims {
-            if layer == dimension {
-                claims.insert((x, z), if owner.is_none() { own } else { other });
+        let show_other = show_other_claims(game);
+        for (&(layer, x, z), claim) in &state.claims {
+            if layer == dimension && (claim.is_own() || show_other) {
+                claims.insert((x, z), if claim.is_own() { own } else { other });
             }
         }
         let own_uuid = game.own_uuid();
         for chunk @ (_, x, z) in state.opac.chunks(dimension, [i32::MIN; 2], [i32::MAX; 2]) {
-            if let Some((owner, _)) = state.opac.owner(chunk) {
+            if let Some((owner, _)) = state.opac.owner(chunk) && (owner == own_uuid || show_other) {
                 claims.insert((x, z), if owner == own_uuid { own } else { other });
             }
         }
@@ -6630,9 +6765,10 @@ fn export_map_png(game: &Game<'_>, state: &mut State, dimension: Dimension) {
 
 fn map_tools(width: f32, height: f32, state: &State) -> impl Iterator<Item = (usize, [f32; 4])> + use<> {
     let server = state.base_world.starts_with("server:");
-    [width - 30., 8., 34., 60., 86., width - 56., 112.]
+    [width - 30., 8., 34., 60., 86., width - 56., 112., width - 82., width - 108.]
         .into_iter().enumerate()
-        .filter(move |(i, _)| *i != 5 || server)
+        .filter(move |(i, _)| !matches!(*i, 5 | 7) || server)
+        .filter(move |(i, _)| *i != 8 || width >= 260.)
         .map(move |(i, x)| (i, [x, height - 30., 22., 22.]))
 }
 
@@ -7143,8 +7279,18 @@ fn draw_map_tools(game: &Game<'_>, batch: &mut HudBatch, state: &State, mouse: [
         } else {
             tr("Map caches", "Кеши карт", "Caches des cartes", "Cachés de mapas", "Karten-Caches")
         },
+        if show_world_other_claims(game) {
+            tr("Hide other players' claims", "Скрыть чужие приваты", "Masquer les claims des autres joueurs",
+                "Ocultar parcelas ajenas", "Fremde Claims ausblenden")
+        } else {
+            tr("Show other players' claims", "Показать чужие приваты", "Afficher les claims des autres joueurs",
+                "Mostrar parcelas ajenas", "Fremde Claims anzeigen")
+        },
+        tr("Tilt at close zoom · right-drag to rotate", "Наклон при зуме · тяни правой кнопкой, чтобы повернуть",
+            "Inclinaison au zoom · glisser avec le bouton droit", "Inclinación al acercar · gira arrastrando con el botón derecho",
+            "Nahansicht neigen · mit Rechtsziehen drehen"),
     ];
-    let icons: [[u8; 7]; 7] = [
+    let icons: [[u8; 7]; 9] = [
         [0b0011100, 0b0100010, 0b1001001, 0b1001001, 0b0100010, 0b0010100, 0b0001000],
         [0b0001000, 0b0011100, 0b0100010, 0b1101011, 0b0100010, 0b0011100, 0b0001000],
         [0b0100010, 0b0100010, 0b1110111, 0b0100010, 0b0100010, 0b1110010, 0b0100010],
@@ -7152,12 +7298,16 @@ fn draw_map_tools(game: &Game<'_>, batch: &mut HudBatch, state: &State, mouse: [
         [0b0111110, 0b1000001, 0b1010101, 0b1010101, 0b1000001, 0b0111110, 0b0010100],
         [0b0011100, 0b0101010, 0b1001001, 0b1111111, 0b1001001, 0b0101010, 0b0011100],
         [0b1111111, 0b1000001, 0b1111111, 0b1000001, 0b1111111, 0b1000001, 0b1111111],
+        [0b1111111, 0b1001001, 0b1001001, 0b1111111, 0b1001001, 0b1001001, 0b1111111],
+        [0b0001000, 0b0011100, 0b0010100, 0b0110010, 0b0100010, 0b1100001, 0b1111111],
     ];
     let mut tooltip = None;
     for (i, rect) in map_tools(batch.width, batch.height, state) {
         let active = i == 0 && state.map_panel == MapPanel::Waypoints
             || i == 5 && (state.map_panel == MapPanel::ServerWorlds || state.world.starts_with("subworld:"))
-            || i == 6 && cache_attention;
+            || i == 6 && cache_attention
+            || i == 7 && show_world_other_claims(game)
+            || i == 8 && game.map_option("world_relief") != Some(0);
         let enabled = i != 4 || latest_death(state).is_some();
         let hover = inside(mouse, rect);
         ui_button(game, batch, rect, "", mouse, enabled,
@@ -7320,6 +7470,12 @@ fn map_tools_press(game: &Game<'_>, state: &mut State, screen: &mod_api::ScreenV
                 state.map_panel_scroll = 0;
             }
             6 => show_cache_manager(game, state),
+            7 => state.map_settings_change = Some(("world_other_claims".to_owned(), (!show_world_other_claims(game)).to_string())),
+            8 => {
+                state.map_settings_change = Some(("world_relief".to_owned(), (game.map_option("world_relief") == Some(0)).to_string()));
+                state.orbit_angle = 0.;
+                state.orbit_pitch = 38_f64.to_radians();
+            }
             _ => {}
         }
         return true;
@@ -7414,6 +7570,8 @@ fn world_zoom_buttons(width:f32) -> [[f32;4];2] {
 fn map_zoom(game:&Game<'_>,state:&mut State,step:f64,offset:[f64;2]) {
     let min=if game.map_option("world_unlimited_zoom_in")==Some(1) {0.025}else{0.1};
     let max=if game.map_option("world_unlimited_zoom_out")==Some(1) {512.}else{64.};
+    let offset = state.frame.as_ref().filter(|frame| frame.view.large)
+        .map_or(offset, |frame| frame.view.ground_delta(offset));
     state.camera.zoom_at_limit(step,offset,min,max);
     state.elapsed=1.;
 }
@@ -7426,7 +7584,9 @@ fn over_map_controls(game:&Game<'_>,state:&State,mouse: [f32; 2], width: f32, he
         || game.map_option("world_zoom_buttons")==Some(1) && world_zoom_buttons(width).into_iter().any(|rect| inside(mouse,rect))
 }
 fn draw_map_screen(game: &Game<'_>, batch: &mut HudBatch, state: &State) {
-    let mouse = if state.mode == Mode::Map { game.cursor() } else { [-1., -1.] };
+    let mouse = if state.mode == Mode::Map && !state.orbit_drag.is_some_and(|(_, moved)| moved) {
+        game.cursor()
+    } else { [-1., -1.] };
     let rect = rectangle(batch.width, batch.height);
     let first_vertex=batch.vertices.len();
     draw(game,batch,state,rect,true,Some(mouse));
@@ -7551,6 +7711,8 @@ fn draw_map_screen(game: &Game<'_>, batch: &mut HudBatch, state: &State) {
         if let Some(waypoint)=waypoint_at_pointer(game,state,&frame.view,rect,mouse) {
             tooltip=Some(if game.map_option("waypoint_hide_coords")==Some(1) {waypoint.name.clone()}
                 else {format!("{}  ({} {} {})",waypoint.name,waypoint.x,waypoint.y,waypoint.z)});
+        } else if game.map_option("world_claims") != Some(0) {
+            tooltip = claim_text(game, state, (frame.view.dimension, block[0].div_euclid(16), block[1].div_euclid(16)));
         }
     }
     let settings = runtime::initialize(game.native_data_dir(runtime::MOD_ID)).settings();
@@ -8303,8 +8465,12 @@ fn map_press(
         return;
     }
     if button == 1 {
-        let menu = menu_target_at(game, state, screen, screen.mouse);
-        state.menu = menu;
+        if state.frame.as_ref().is_some_and(|frame| frame.view.relief.is_some()) {
+            state.orbit_drag = Some((screen.mouse, false));
+            state.menu = None;
+        } else {
+            state.menu = menu_target_at(game, state, screen, screen.mouse);
+        }
         *canceled = true;
         return;
     }
@@ -8949,10 +9115,23 @@ fn cancel_name(state: &mut State) {
 }
 
 pub(super) fn drag(game: &Game<'_>, delta: [f32; 2], button: i32, canceled: &mut bool) {
-    if game.mod_screen() != Some(runtime::MOD_ID) || !game.map_on(runtime::MOD_ID) || button != 0 {
+    if game.mod_screen() != Some(runtime::MOD_ID) || !game.map_on(runtime::MOD_ID) {
         return;
     }
     let mut state = state();
+    if button == 1 && state.mode == Mode::Map && let Some((origin, moved)) = state.orbit_drag {
+        let mouse = game.cursor();
+        if moved || (mouse[0]-origin[0]).hypot(mouse[1]-origin[1]) >= 3. {
+            state.orbit_angle -= f64::from(delta[0]) * 0.008;
+            state.orbit_pitch = (state.orbit_pitch + f64::from(delta[1]) * 0.006)
+                .clamp(12_f64.to_radians(), 55_f64.to_radians());
+            state.orbit_drag = Some((origin, true));
+            state.elapsed = 1.;
+        }
+        *canceled = true;
+        return;
+    }
+    if button != 0 { return; }
     if state.info.is_some() {
         *canceled = true;
         return;
@@ -8978,9 +9157,23 @@ pub(super) fn drag(game: &Game<'_>, delta: [f32; 2], button: i32, canceled: &mut
     if state.mode != Mode::Map || !state.dragging {
         return;
     }
-    state.camera.pan([f64::from(delta[0]), f64::from(delta[1])]);
+    let delta = delta.map(f64::from);
+    let delta = state.frame.as_ref().filter(|frame| frame.view.large)
+        .map_or(delta, |frame| frame.view.ground_delta(delta));
+    state.camera.pan(delta);
     state.elapsed = 1.0;
     *canceled = true;
+}
+
+pub(super) fn release(game: &Game<'_>, screen: &mod_api::ScreenView<'_>, button: i32, canceled: &mut bool) {
+    if game.mod_screen() != Some(runtime::MOD_ID) || button != 1 { return; }
+    let mut state = state();
+    if let Some((origin,moved)) = state.orbit_drag.take() {
+        if !moved && state.mode == Mode::Map {
+            state.menu = menu_target_at(game, &state, screen, origin);
+        }
+        *canceled = true;
+    }
 }
 
 pub(super) fn scroll(
@@ -9388,6 +9581,7 @@ pub(super) fn disconnect(game: &Game<'_>) {
         record_death(game, &world, location);
     }
     runtime::set_text_input(false);
+    map_claims::reset();
     QUICK_MINIMAP.store(0,std::sync::atomic::Ordering::Relaxed);
     LOCATOR_WAYPOINTS.lock().unwrap_or_else(|error| error.into_inner()).clear();
     WAYSTONES.lock().unwrap_or_else(|error| error.into_inner()).clear();

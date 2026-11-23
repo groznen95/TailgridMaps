@@ -951,6 +951,7 @@ macro_rules! define_tests {
                     width: 16,
                     height: 16,
                     angle: 0.0,
+                    relief: None,
                     round: false,
                     large: true,
                 }
@@ -1992,6 +1993,25 @@ macro_rules! define_tests {
                     assert!((back[1] - world[1]).abs() < 1e-9);
                 }
                 assert_eq!(frame.block_at(8.0, 8.0), [100, -43]);
+            }
+
+            #[test]
+            fn tilted_view_picks_the_raised_surface_at_different_headings() {
+                let mut cache = Cache::default();
+                let mut tile = Tile { pixels: vec![255; 1024], heights: [64; 256], ..Tile::default() };
+                tile.heights[7*16+7] = 72;
+                cache.insert(Dimension::Overworld, Layer::Surface, [-1, 0], tile);
+                let mut frame = view(Dimension::Overworld);
+                frame.center = [-8.5, 7.5];
+                frame.relief = Some(Relief { pitch: 0.65, reference: 64., stride: 1, coverage: Arc::new(cache.coverage()) });
+                for angle in [0., 0.7, 1.6, -2.2] {
+                    frame.angle = angle;
+                    let [x,y] = frame.screen_at(frame.center);
+                    assert!(y < frame.height as f64 / 2.);
+                    assert_eq!(frame.block_at(x,y),[-9,7]);
+                    let flat = frame.screen_at_height(frame.center, None);
+                    assert_eq!(frame.world_at(flat[0],flat[1]),frame.center);
+                }
             }
             #[test]
             fn an_underground_slice_does_not_sample_the_bedrock_roof() {

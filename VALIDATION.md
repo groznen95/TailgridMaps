@@ -1,5 +1,23 @@
 # Kadir's Map validation
 
+## 0.1.16
+
+The checked source package built with Freecam+ on Horizon Nightly 2026-11-22 (`f1bb66f`). In a disposable world with sandstone, brick, and plank surfaces, close zoom displayed texture details inside individual blocks and the 3D panel showed the structures at different elevations. Both settings changed what the screen displayed, and the existing waypoint still opened the correct area.
+
+After restarting the client with the player more than 600 blocks away, opening the same waypoint displayed the stone tower in the 3D panel from cached heights. Horizon SMP opened the map and waypoint list with a copy of the existing cache. The original map files matched their pre-test hashes.
+
+## 0.1.15
+
+Horizon Nightly 2026-11-22 (`f1bb66f`, 21:01 UTC) built Kadir's Map and Freecam+ together. The radar calls the Nightly's mob layer renderer with the engine's resolved armor layers.
+
+The test build opened a copy of `New World` with the map enabled and passed the Freecam movement check. On Horizon SMP, the waypoint list opened and the claims toggle displayed and hid a nearby claim. The live test retained the existing cache paths and waypoint records in the copy, and the original map data matched its pre-test hashes.
+
+## 0.1.14
+
+The source package passed the native package checker and built alongside Freecam+ on Horizon Nightly 2026-11-22 (`2b77287`). On the pinned SDK, 142 tests passed and three were ignored. The claim tests cover a successful claim and unclaim, a rejected request, and a complete 11 × 11 survey at negative coordinates.
+
+On live Horizon SMP, the toolbar switch showed an amber overlay for a nearby claim and hid it on a second click. Automatic survey lines stayed out of chat. The client opened the map and waypoint list with a copy of the existing cache, and the source map data retained its hashes. The live check only read claim data.
+
 ## 0.1.13
 
 The source `.hmod` passed the native package checker and built on macOS Apple Silicon for Horizon Nightly 2026-11-22 (`2b77287`), Minecraft 26.3 and Mixins `e59da90`.
@@ -77,3 +95,9 @@ Both release archives passed the native package checker. The test profile opened
 The main profile reached the title screen after installation. Options → Mods displayed **Kadir's Map** with the new pixel-art icon and **Freecam+ 2.0.5** with its Russian display name and icon. All files in the original map data directory matched their pre-install hashes. The mod ID remains `trailgrid_maps`.
 
 Multiplayer was outside these checks.
+
+## 0.1.17
+
+- Built against the signed SDK for Horizon Nightly 2026-11-22 (`f1bb66f`).
+- Verified full-map surface tilt, mouse rotation and pitch, the right-click menu, returning to 2D and waypoint persistence in a local world.
+- Opened the tilted surface map on Horizon SMP and checked the claim toggle, world identity, existing waypoints and cache paths.
